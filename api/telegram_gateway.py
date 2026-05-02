@@ -1,60 +1,128 @@
 import telebot
-import requests
-import time
 import os
+import sys
+import subprocess
+import requests
+import threading
+import time
+import base64
+import io
+import redis
+from PIL import Image
+
+sys.path.insert(0, '/root/bastobot')
+
+_redis = redis.Redis(host='localhost', port=6379, db=0)
+
+
+def _ack_message(category):
+    """Return the right acknowledgment based on rolling average job time for this category."""
+    try:
+        from workers.tasks import get_avg_timing
+        avg = get_avg_timing(category)
+        if avg is not None and avg > 30:
+            return f"⏳ Give me a couple minutes... ({category})"
+        if avg is not None and avg > 8:
+            return f"⏳ On it... (~{int(avg)}s, {category})"
+    except Exception:
+        pass
+    return f"⏳ On it... ({category})"
+
 
 TOKEN = "***REDACTED_TELEGRAM_TOKEN***"
 AUTHORIZED_ID = 298886049
-API_URL = "http://127.0.0.1:18790"
-IMG_DIR = "/root/bastobot/temp_images"
-os.makedirs(IMG_DIR, exist_ok=True)
-
+API_BASE = "http://127.0.0.1:18790"
 bot = telebot.TeleBot(TOKEN)
 
-@bot.message_handler(content_types=['photo'], func=lambda m: m.from_user.id == AUTHORIZED_ID)
-def handle_photo(m):
-    status_msg = bot.reply_to(m, "📥 👁️ Barry is looking...")
-    try:
-        file_info = bot.get_file(m.photo[-1].file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        img_path = os.path.join(IMG_DIR, f"{m.message_id}.jpg")
-        with open(img_path, 'wb') as f:
-            f.write(downloaded_file)
-        
-        r = requests.post(f"{API_URL}/query", json={"message": m.caption or "What is this?", "image_path": img_path})
-        jid = r.json().get("job_id")
-        
-        start_time = time.time()
-        while True:
-            time.sleep(2)
-            res = requests.get(f"{API_URL}/result/{jid}").json()
-            if res.get("status") == "complete":
-                bot.edit_message_text(f"✅ Vision:\n\n{res.get('response')}", m.chat.id, status_msg.message_id)
-                break
-            if time.time() - start_time > 120:
-                bot.edit_message_text("❌ Timeout", m.chat.id, status_msg.message_id)
-                break
-    except Exception as e:
-        bot.reply_to(m, f"❌ Error: {e}")
+print("Barry is awake and listening...")
 
-@bot.message_handler(func=lambda m: m.from_user.id == AUTHORIZED_ID)
-def handle_text(m):
-    status_msg = bot.reply_to(m, "🤖 Thinking...")
-    try:
-        r = requests.post(f"{API_URL}/query", json={"message": m.text})
-        jid = r.json().get("job_id")
-        
-        start_time = time.time()
-        while True:
-            time.sleep(2)
-            res = requests.get(f"{API_URL}/result/{jid}").json()
-            if res.get("status") == "complete":
-                bot.edit_message_text(f"✅ Response:\n\n{res.get('response')}", m.chat.id, status_msg.message_id)
-                break
-            if time.time() - start_time > 60:
-                bot.edit_message_text("❌ Timeout", m.chat.id, status_msg.message_id)
-                break
-    except Exception as e:
-        bot.reply_to(m, f"❌ Error: {e}")
 
-bot.infinity_polling()
+def poll_and_reply(job_id, chat_id):
+    for _ in range(60):  # 5 min at 5s intervals
+        time.sleep(5)
+        try:
+            res = requests.get(f"{API_BASE}/result/{job_id}", timeout=5)
+            data = res.json()
+            if data.get("status") == "complete":
+                bot.send_message(chat_id, data["response"])
+                return
+            if data.get("status") in ("failed", "error"):
+                bot.send_message(chat_id, f"❌ Job failed: {data.get('message', 'unknown error')}")
+                return
+        except Exception:
+            pass
+    bot.send_message(chat_id, "⏱ Request timed out.")
+
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    if message.from_user.id == AUTHORIZED_ID:
+        bot.reply_to(message, "Online and ready. Reply to any message with /save to vault it.")
+
+
+@bot.message_handler(commands=['save'])
+def handle_save_command(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    if message.reply_to_message:
+        content = message.reply_to_message.text or "Photo/Media"
+        print(f"!!! SAVING TO VAULT: {content}")
+        try:
+            subprocess.Popen(["python3", "/root/bastobot/api/save_to_notion.py", str(content)])
+            bot.reply_to(message, "🚀 Sent to the Vault!")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Failed to save: {e}")
+    else:
+        bot.reply_to(message, "⚠️ Reply to a message with /save to vault it.")
+
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    try:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        file_bytes = bot.download_file(file_info.file_path)
+        img = Image.open(io.BytesIO(file_bytes))
+        img.thumbnail((1280, 1280), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        caption = message.caption or ""
+        res = requests.post(
+            f"{API_BASE}/query",
+            json={"message": caption, "image_b64": image_b64, "mime_type": "image/jpeg"},
+            timeout=15
+        )
+        data = res.json()
+        bot.reply_to(message, _ack_message(data.get('category', 'vision')))
+        threading.Thread(
+            target=poll_and_reply,
+            args=(data["job_id"], message.chat.id),
+            daemon=True
+        ).start()
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
+@bot.message_handler(func=lambda m: True)
+def handle_message(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    try:
+        res = requests.post(f"{API_BASE}/query", json={"message": message.text}, timeout=10)
+        data = res.json()
+        if data.get("category") == "simple":
+            bot.reply_to(message, data["response"])
+        else:
+            bot.reply_to(message, _ack_message(data.get('category', 'queued')))
+            threading.Thread(
+                target=poll_and_reply,
+                args=(data["job_id"], message.chat.id),
+                daemon=True
+            ).start()
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
+bot.infinity_polling(timeout=20, long_polling_timeout=15)
