@@ -76,6 +76,27 @@ def handle_save_command(message):
         bot.reply_to(message, "⚠️ Reply to a message with /save to vault it.")
 
 
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    try:
+        doc = message.document
+        if doc.mime_type != 'application/pdf':
+            bot.reply_to(message, f"📄 Unsupported file type ({doc.mime_type}). Only PDFs for now.")
+            return
+        file_info = bot.get_file(doc.file_id)
+        file_bytes = bot.download_file(file_info.file_path)
+        filename = doc.file_name or "document.pdf"
+        save_path = f"/root/.openclaw/workspace/{filename}"
+        with open(save_path, 'wb') as f:
+            f.write(file_bytes)
+        size_kb = len(file_bytes) // 1024
+        bot.reply_to(message, f"📄 Saved `{filename}` ({size_kb}KB) to workspace. Claude can read it now.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error handling document: {e}")
+
+
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     if message.from_user.id != AUTHORIZED_ID:
