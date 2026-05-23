@@ -258,9 +258,29 @@ def _call_model(models, content):
         raise RuntimeError(data.get('error', {}).get('message', str(data)))
     return data['choices'][0]['message']['content']
 
+_SNAPSHOT_KEYWORDS = ("snapshot", "market overview", "market update", "market check")
+
+def _is_snapshot_request(prompt: str) -> bool:
+    if not prompt:
+        return False
+    p = prompt.lower().strip()
+    return any(kw in p for kw in _SNAPSHOT_KEYWORDS)
+
+
 def process_task(prompt, category=None, *args, image_b64=None, mime_type="image/jpeg", **kwargs):
     print(f"--- Processing [{category}]: {prompt[:60] if prompt else '[image only]'} ---")
     start = time.time()
+
+    # Verified snapshot flow: two API calls 60s apart + Notion log
+    if category == "financial" and not image_b64 and _is_snapshot_request(prompt):
+        try:
+            from skills.snapshot_logger import run_verified_snapshot
+            result, flags = run_verified_snapshot(tag="manual")
+            record_timing("financial", time.time() - start)
+            return result
+        except Exception as e:
+            print(f"Verified snapshot failed, falling back: {e}")
+
     content = _build_content(prompt, category, image_b64, mime_type)
     models = VISION_MODELS if image_b64 else TEXT_MODELS
     try:
@@ -272,4 +292,13 @@ def process_task(prompt, category=None, *args, image_b64=None, mime_type="image/
         record_timing(category or "medium", time.time() - start)
     except Exception:
         pass
+    # Auto-log chart trade ideas to Notion
+    if image_b64:
+        try:
+            from skills.notion_logger import log_trade_idea
+            notion_url = log_trade_idea(result)
+            if notion_url:
+                result += f"\n\n📓 _Logged to Notion_"
+        except Exception as e:
+            print(f"Notion log error: {e}")
     return result
