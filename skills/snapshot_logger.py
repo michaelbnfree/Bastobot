@@ -1,11 +1,14 @@
 """
-Verified BTC snapshot: two API calls 60s apart, anomaly comparison, Notion log.
+Verified BTC snapshot: two API calls 60s apart, anomaly comparison, Notion log,
+JSONL data file, and GitHub Issues for suspect snapshots.
 Called by the cron job and by Telegram snapshot requests.
 """
 
 import os
 import re
+import json
 import time
+import subprocess
 import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -15,6 +18,9 @@ load_dotenv('/root/bastobot/.env')
 NOTION_API_KEY   = os.getenv("NOTION_API_KEY")
 NOTION_VERSION   = "2022-06-28"
 SNAPSHOT_DB_ID   = "36970a02-6811-819d-8132-dc53402347cb"
+GITHUB_TOKEN     = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO      = "michaelbnfree/Bastobot"
+JSONL_PATH       = "/root/bastobot/data/snapshots.jsonl"
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -203,12 +209,108 @@ def log_snapshot_to_notion(snapshot_text: str, data: dict, flags: list[str], tag
         return None
 
 
+# ── JSONL data log ────────────────────────────────────────────────────────────
+
+def append_to_jsonl(data: dict, flags: list[str], tag: str, notion_url: str | None = None) -> None:
+    """Append one line to data/snapshots.jsonl for the full queryable dataset."""
+    now = datetime.now(timezone.utc)
+    binance    = data.get("binance", {})
+    ta_1d      = data.get("ta", {}).get("1d", {})
+    derivatives = data.get("derivatives", {})
+    bybit_oi   = data.get("bybit", {}).get("oi_usd_bn", 0)
+    okx_oi     = data.get("okx", {}).get("oi_usd_bn", 0)
+
+    row = {
+        "timestamp":      now.isoformat(),
+        "tag":            tag,
+        "price":          binance.get("price"),
+        "change_24h_pct": binance.get("change_24h_pct"),
+        "change_7d_pct":  binance.get("change_7d_pct"),
+        "high_24h":       binance.get("high_24h"),
+        "low_24h":        binance.get("low_24h"),
+        "rsi_1h":         data.get("ta", {}).get("1h", {}).get("rsi"),
+        "rsi_4h":         data.get("ta", {}).get("4h", {}).get("rsi"),
+        "rsi_1d":         ta_1d.get("rsi"),
+        "adx_1d":         ta_1d.get("adx"),
+        "signal_1d":      ta_1d.get("summary", {}).get("RECOMMENDATION"),
+        "funding_binance": derivatives.get("funding_rate_pct"),
+        "funding_bybit":  data.get("bybit", {}).get("funding_rate_pct"),
+        "funding_okx":    data.get("okx", {}).get("funding_rate_pct"),
+        "funding_avg":    _avg_funding(data),
+        "oi_total_bn":    round(derivatives.get("oi_usd_bn", 0) + bybit_oi + okx_oi, 2),
+        "oi_change_24h":  derivatives.get("oi_change_24h_pct"),
+        "liq_longs_usd":  data.get("liquidations", {}).get("longs_liq_usd"),
+        "liq_shorts_usd": data.get("liquidations", {}).get("shorts_liq_usd"),
+        "liq_total_usd":  data.get("liquidations", {}).get("total_liq_usd"),
+        "ls_global":      derivatives.get("global_ls_ratio"),
+        "ls_top_traders": derivatives.get("top_trader_ls_ratio"),
+        "fear_greed":     data.get("fear_greed", {}).get("score"),
+        "btc_dominance":  data.get("market", {}).get("btc_dominance_pct"),
+        "flag_count":     len(flags),
+        "suspect":        any("🚨" in f for f in flags),
+        "flags":          flags,
+        "notion_url":     notion_url,
+    }
+    try:
+        with open(JSONL_PATH, "a") as f:
+            f.write(json.dumps(row) + "\n")
+        print(f"[JSONL] Appended row for {now.strftime('%H:%M UTC')}")
+    except Exception as e:
+        print(f"[JSONL] Write failed: {e}")
+
+
+# ── GitHub Issue for suspect snapshots ───────────────────────────────────────
+
+def open_github_issue(flags: list[str], data: dict, notion_url: str | None, tag: str) -> str | None:
+    """Opens a GitHub Issue when a snapshot is marked suspect (🚨 flags present)."""
+    if not GITHUB_TOKEN:
+        print("[GH] No GITHUB_TOKEN — skipping issue")
+        return None
+
+    now = datetime.now(timezone.utc)
+    title = f"🚨 Suspect snapshot — {now.strftime('%b %d, %Y %H:%M UTC')} ({tag})"
+    price = data.get("binance", {}).get("price")
+    price_str = f"${price:,.2f}" if price else "unknown"
+
+    flag_lines = "\n".join(f"- {f}" for f in flags)
+    notion_link = f"\n\n**Notion page:** {notion_url}" if notion_url else ""
+    body = (
+        f"## Data anomaly detected\n\n"
+        f"**Time:** {now.strftime('%Y-%m-%d %H:%M UTC')}  \n"
+        f"**Price at snapshot:** {price_str}  \n"
+        f"**Tag:** {tag}\n\n"
+        f"### Flags\n{flag_lines}"
+        f"{notion_link}\n\n"
+        f"---\n"
+        f"*Auto-opened by Barry's snapshot pipeline. "
+        f"Investigate the flagged sources before using this snapshot for analysis.*"
+    )
+    try:
+        r = requests.post(
+            f"https://api.github.com/repos/{GITHUB_REPO}/issues",
+            headers={
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"title": title, "body": body, "labels": ["snapshot", "suspect-data", "data-quality"]},
+            timeout=15,
+        )
+        r.raise_for_status()
+        url = r.json().get("html_url", "")
+        print(f"[GH] Issue opened: {url}")
+        return url
+    except Exception as e:
+        print(f"[GH] Issue error: {e}")
+    return None
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_verified_snapshot(tag: str = "scheduled") -> tuple[str, list[str]]:
     """
     Two API calls 60s apart. Returns (snapshot_text, flags).
-    Logs to Notion automatically.
+    Logs to Notion, JSONL, and GitHub (if suspect).
     """
     import sys
     sys.path.insert(0, '/root/bastobot')
@@ -225,12 +327,12 @@ def run_verified_snapshot(tag: str = "scheduled") -> tuple[str, list[str]]:
     data2 = get_btc_analysis()
 
     flags = validate_snapshot(data1, data2)
+    suspect = any("🚨" in f for f in flags)
 
     # Use call-2 data for the snapshot (more recent), but flag if suspect
     market_text = _fetch_market_data()
     flag_header = ""
     if flags:
-        suspect = any("🚨" in f for f in flags)
         icon = "🚨 SUSPECT DATA" if suspect else "⚠️ DATA FLAGS"
         flag_header = f"[{icon}: {'; '.join(flags)}]\n\n"
 
@@ -238,6 +340,12 @@ def run_verified_snapshot(tag: str = "scheduled") -> tuple[str, list[str]]:
     snapshot_text = _call_model(TEXT_MODELS, prompt)
 
     notion_url = log_snapshot_to_notion(snapshot_text, data2, flags, tag)
+
+    append_to_jsonl(data2, flags, tag, notion_url)
+
+    if suspect:
+        open_github_issue(flags, data2, notion_url, tag)
+
     if notion_url:
         snapshot_text += f"\n\n📓 _Logged to Notion_"
 
