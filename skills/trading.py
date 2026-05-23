@@ -215,12 +215,14 @@ def _get_liquidations():
             "?instType=SWAP&uly=BTC-USDT&state=filled&limit=100",
             timeout=10,
         )
+        # BTC-USDT-SWAP: sz is in contracts, ctVal = 0.01 BTC per contract
+        CT_VAL = 0.01
         for order in r.json().get("data", []):
             for d in order.get("details", []):
                 if int(d["ts"]) < since_ms:
                     continue
                 px = float(d["bkPx"])
-                usd_val = float(d["sz"]) * px
+                usd_val = float(d["sz"]) * CT_VAL * px
                 bucket = int(px // 500) * 500
                 buckets[bucket] = buckets.get(bucket, 0) + usd_val
                 if d["posSide"] == "long":
@@ -232,20 +234,26 @@ def _get_liquidations():
     def _parse_gateio(from_s, to_s):
         long_usd = short_usd = 0.0
         buckets: dict[int, float] = {}
+        # Gate.io requires max 1h window per request; fetch most recent 1h only
+        window_end = to_s
+        window_start = max(from_s, to_s - 3600)
         r = requests.get(
             f"https://api.gateio.ws/api/v4/futures/usdt/liq_orders"
-            f"?contract=BTC_USDT&from={from_s}&to={to_s}&limit=100",
+            f"?contract=BTC_USDT&from={window_start}&to={window_end}&limit=100",
             timeout=10,
         )
+        # BTC_USDT quanto_multiplier = 0.0001 (each contract = 0.0001 BTC)
+        # size > 0 = long liquidated; size < 0 = short liquidated
+        QUANTO = 0.0001
         for o in (r.json() if isinstance(r.json(), list) else []):
             px = float(o.get("fill_price") or o.get("order_price") or 0)
-            sz = abs(float(o.get("size", 0)))
-            if not px or not sz:
+            raw_size = float(o.get("size", 0))
+            if not px or not raw_size:
                 continue
-            usd_val = sz * px
+            usd_val = abs(raw_size) * QUANTO * px
             bucket = int(px // 500) * 500
             buckets[bucket] = buckets.get(bucket, 0) + usd_val
-            if o.get("is_long"):
+            if raw_size > 0:
                 long_usd += usd_val
             else:
                 short_usd += usd_val
