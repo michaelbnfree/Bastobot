@@ -10,6 +10,7 @@ import json
 import time
 import subprocess
 import requests
+import redis as _redis_lib
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -70,13 +71,33 @@ def validate_snapshot(d1: dict, d2: dict | None = None) -> list[str]:
         if len(set(signs.values())) > 1:
             flags.append(f"⚠️ Funding sign mismatch: {funding}")
 
-    # 4. Liquidation magnitude sanity
+    # 4. Liquidation magnitude sanity + cross-source consistency
     if "liquidations" in d1:
-        total = d1["liquidations"]["total_liq_usd"]
+        liq = d1["liquidations"]
+        total = liq["total_liq_usd"]
         if total > 2_000_000_000:
             flags.append(f"🚨 Liq total ${total:,.0f} exceeds $2B — data suspect")
         elif total < 50_000:
             flags.append(f"⚠️ Liq total ${total:,.0f} unusually low — possible feed issue")
+        if liq.get("gate_excluded"):
+            flags.append(f"⚠️ Gate.io liq excluded (10x outlier vs OKX: gate=${liq['gate_liq_usd']:,}  okx=${liq['okx_liq_usd']:,})")
+        elif liq.get("okx_liq_usd") and liq.get("gate_liq_usd"):
+            ok, ga = liq["okx_liq_usd"], liq["gate_liq_usd"]
+            if ok > 0 and ga > 0:
+                ratio = max(ok, ga) / min(ok, ga)
+                if ratio > 5:
+                    flags.append(f"⚠️ Liq source divergence {ratio:.1f}x: OKX=${ok:,}  Gate=${ga:,} — treat total as approximate")
+
+    # 4b. Per-field absolute bounds
+    btc_price = d1.get("binance", {}).get("price")
+    if btc_price and not (1_000 < btc_price < 500_000):
+        flags.append(f"🚨 BTC price ${btc_price:,.0f} outside valid range — bad data")
+    for exch, src in [("binance", d1.get("derivatives", {})),
+                      ("bybit",   d1.get("bybit", {})),
+                      ("okx",     d1.get("okx", {}))]:
+        fr = src.get("funding_rate_pct")
+        if fr is not None and abs(fr) > 0.5:
+            flags.append(f"🚨 {exch} funding rate {fr:+.4f}% out of normal range (>0.5%) — possible bad data")
 
     # 5. Two-call comparison (d2 is 60s after d1)
     if d2:
@@ -144,12 +165,12 @@ def _avg_funding(data: dict) -> float | None:
 
 # ── Notion logger ─────────────────────────────────────────────────────────────
 
-def log_snapshot_to_notion(snapshot_text: str, data: dict, flags: list[str], tag: str = "scheduled") -> str | None:
+def log_snapshot_to_notion(snapshot_text: str, data: dict, flags: list[str], tag: str = "scheduled", asset: str = "BTC") -> str | None:
     if not NOTION_API_KEY:
         return None
 
     now = datetime.now(timezone.utc)
-    title = f"BTC Snapshot — {now.strftime('%b %d, %Y %H:%M')} UTC"
+    title = f"{asset} Snapshot — {now.strftime('%b %d, %Y %H:%M')} UTC"
     binance = data.get("binance", {})
     ta_1d   = data.get("ta", {}).get("1d", {})
 
@@ -211,45 +232,70 @@ def log_snapshot_to_notion(snapshot_text: str, data: dict, flags: list[str], tag
 
 # ── JSONL data log ────────────────────────────────────────────────────────────
 
-def append_to_jsonl(data: dict, flags: list[str], tag: str, notion_url: str | None = None) -> None:
+def append_to_jsonl(data: dict, flags: list[str], tag: str, notion_url: str | None = None,
+                    bias: str | None = None, asset: str = "BTC") -> None:
     """Append one line to data/snapshots.jsonl for the full queryable dataset."""
     now = datetime.now(timezone.utc)
-    binance    = data.get("binance", {})
-    ta_1d      = data.get("ta", {}).get("1d", {})
+    binance     = data.get("binance", {})
+    ta_1h       = data.get("ta", {}).get("1h", {})
+    ta_4h       = data.get("ta", {}).get("4h", {})
+    ta_1d       = data.get("ta", {}).get("1d", {})
     derivatives = data.get("derivatives", {})
-    bybit_oi   = data.get("bybit", {}).get("oi_usd_bn", 0)
-    okx_oi     = data.get("okx", {}).get("oi_usd_bn", 0)
+    bybit_oi    = data.get("bybit", {}).get("oi_usd_bn", 0)
+    okx_oi      = data.get("okx", {}).get("oi_usd_bn", 0)
+    regime      = _BIAS_TO_REGIME.get(bias or "", "CRAB") if bias else None
 
     row = {
-        "timestamp":      now.isoformat(),
-        "tag":            tag,
-        "price":          binance.get("price"),
-        "change_24h_pct": binance.get("change_24h_pct"),
-        "change_7d_pct":  binance.get("change_7d_pct"),
-        "high_24h":       binance.get("high_24h"),
-        "low_24h":        binance.get("low_24h"),
-        "rsi_1h":         data.get("ta", {}).get("1h", {}).get("rsi"),
-        "rsi_4h":         data.get("ta", {}).get("4h", {}).get("rsi"),
-        "rsi_1d":         ta_1d.get("rsi"),
-        "adx_1d":         ta_1d.get("adx"),
-        "signal_1d":      ta_1d.get("summary", {}).get("RECOMMENDATION"),
-        "funding_binance": derivatives.get("funding_rate_pct"),
-        "funding_bybit":  data.get("bybit", {}).get("funding_rate_pct"),
-        "funding_okx":    data.get("okx", {}).get("funding_rate_pct"),
-        "funding_avg":    _avg_funding(data),
-        "oi_total_bn":    round(derivatives.get("oi_usd_bn", 0) + bybit_oi + okx_oi, 2),
-        "oi_change_24h":  derivatives.get("oi_change_24h_pct"),
-        "liq_longs_usd":  data.get("liquidations", {}).get("longs_liq_usd"),
-        "liq_shorts_usd": data.get("liquidations", {}).get("shorts_liq_usd"),
-        "liq_total_usd":  data.get("liquidations", {}).get("total_liq_usd"),
-        "ls_global":      derivatives.get("global_ls_ratio"),
-        "ls_top_traders": derivatives.get("top_trader_ls_ratio"),
-        "fear_greed":     data.get("fear_greed", {}).get("score"),
-        "btc_dominance":  data.get("market", {}).get("btc_dominance_pct"),
-        "flag_count":     len(flags),
-        "suspect":        any("🚨" in f for f in flags),
-        "flags":          flags,
-        "notion_url":     notion_url,
+        "timestamp":           now.isoformat(),
+        "asset":               asset,
+        "tag":                 tag,
+        "bias":                bias,
+        "regime":              regime,
+        # Price
+        "price":               binance.get("price"),
+        "change_24h_pct":      binance.get("change_24h_pct"),
+        "change_7d_pct":       binance.get("change_7d_pct"),
+        "high_24h":            binance.get("high_24h"),
+        "low_24h":             binance.get("low_24h"),
+        "volume_change_pct":   binance.get("volume_change_pct"),
+        # TA — multi-TF
+        "signal_1h":           ta_1h.get("summary", {}).get("RECOMMENDATION"),
+        "signal_4h":           ta_4h.get("summary", {}).get("RECOMMENDATION"),
+        "signal_1d":           ta_1d.get("summary", {}).get("RECOMMENDATION"),
+        "rsi_1h":              ta_1h.get("rsi"),
+        "rsi_4h":              ta_4h.get("rsi"),
+        "rsi_1d":              ta_1d.get("rsi"),
+        "adx_1d":              ta_1d.get("adx"),
+        "macd_1d":             ta_1d.get("macd"),
+        "ema_20_1d":           ta_1d.get("ema_20"),
+        "ema_50_1d":           ta_1d.get("ema_50"),
+        "ema_200_1d":          ta_1d.get("ema_200"),
+        "bb_upper_1d":         ta_1d.get("bb_upper"),
+        "bb_lower_1d":         ta_1d.get("bb_lower"),
+        # Derivatives
+        "funding_binance":     derivatives.get("funding_rate_pct"),
+        "funding_bybit":       data.get("bybit", {}).get("funding_rate_pct"),
+        "funding_okx":         data.get("okx", {}).get("funding_rate_pct"),
+        "funding_avg":         _avg_funding(data),
+        "taker_buy_sell":      derivatives.get("taker_buy_sell_ratio"),
+        "oi_total_bn":         round(derivatives.get("oi_usd_bn", 0) + bybit_oi + okx_oi, 2),
+        "oi_change_24h":       derivatives.get("oi_change_24h_pct"),
+        # Liquidations
+        "liq_longs_usd":       data.get("liquidations", {}).get("longs_liq_usd"),
+        "liq_shorts_usd":      data.get("liquidations", {}).get("shorts_liq_usd"),
+        "liq_total_usd":       data.get("liquidations", {}).get("total_liq_usd"),
+        "liq_change_pct":      data.get("liquidations", {}).get("change_pct"),
+        # Positioning
+        "ls_global":           derivatives.get("global_ls_ratio"),
+        "ls_top_traders":      derivatives.get("top_trader_ls_ratio"),
+        # Sentiment
+        "fear_greed":          data.get("fear_greed", {}).get("score"),
+        "btc_dominance":       data.get("market", {}).get("btc_dominance_pct"),
+        # Quality
+        "flag_count":          len(flags),
+        "suspect":             any("🚨" in f for f in flags),
+        "flags":               flags,
+        "notion_url":          notion_url,
     }
     try:
         with open(JSONL_PATH, "a") as f:
@@ -307,41 +353,61 @@ def open_github_issue(flags: list[str], data: dict, notion_url: str | None, tag:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def run_verified_snapshot(tag: str = "scheduled") -> tuple[str, list[str]]:
+def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC") -> tuple[str, list[str]]:
     """
     Two API calls 60s apart. Returns (snapshot_text, flags).
     Logs to Notion, JSONL, and GitHub (if suspect).
     """
     import sys
     sys.path.insert(0, '/root/bastobot')
-    from skills.trading import get_btc_analysis
+    from skills.trading import get_btc_analysis, get_asset_analysis
     from workers.tasks import _fetch_market_data, _call_model, TEXT_MODELS, TRADING_INSTRUCTION
 
-    print(f"[SNAPSHOT] Call 1 of 2 (tag={tag})")
-    data1 = get_btc_analysis()
+    fetch = get_btc_analysis if asset == "BTC" else lambda: get_asset_analysis(asset)
+
+    print(f"[SNAPSHOT] Call 1 of 2 (tag={tag}, asset={asset})")
+    data1 = fetch()
 
     print("[SNAPSHOT] Waiting 60s for call 2...")
     time.sleep(60)
 
     print("[SNAPSHOT] Call 2 of 2")
-    data2 = get_btc_analysis()
+    data2 = fetch()
 
     flags = validate_snapshot(data1, data2)
     suspect = any("🚨" in f for f in flags)
 
-    # Use call-2 data for the snapshot (more recent), but flag if suspect
-    market_text = _fetch_market_data()
+    # Use call-2 data for the snapshot (more recent), but scrub suspect sources
+    scrubbed = dict(data2)
+    if suspect:
+        # Identify which sources are flagged and remove them from the data block
+        flagged_text = " ".join(flags).lower()
+        if "liq" in flagged_text and ("🚨" in " ".join(f for f in flags if "liq" in f.lower() or "gate" in f.lower())):
+            scrubbed.pop("liquidations", None)
+            print("[SNAPSHOT] Liquidation data scrubbed from prompt due to 🚨 flag")
+        if "price" in flagged_text and "outside valid range" in flagged_text:
+            scrubbed.pop("binance", None)
+            print("[SNAPSHOT] Binance price data scrubbed from prompt due to 🚨 flag")
+        if "funding rate" in flagged_text:
+            for src in ["derivatives", "bybit", "okx"]:
+                if any(src in f for f in flags if "🚨" in f):
+                    scrubbed.pop(src, None)
+                    print(f"[SNAPSHOT] {src} data scrubbed from prompt due to 🚨 funding flag")
+
+    market_text = _fetch_market_data(asset)
     flag_header = ""
     if flags:
-        icon = "🚨 SUSPECT DATA" if suspect else "⚠️ DATA FLAGS"
+        icon = "🚨 SUSPECT DATA — some sources scrubbed" if suspect else "⚠️ DATA FLAGS"
         flag_header = f"[{icon}: {'; '.join(flags)}]\n\n"
 
-    prompt = f"{TRADING_INSTRUCTION}\n\n{flag_header}btc snapshot\n\n{market_text}"
+    instruction = TRADING_INSTRUCTION.replace("BTC", asset)
+    prompt = f"{instruction}\n\n{flag_header}{asset.lower()} snapshot\n\n{market_text}"
     snapshot_text = _call_model(TEXT_MODELS, prompt)
 
-    notion_url = log_snapshot_to_notion(snapshot_text, data2, flags, tag)
+    bias = _extract_bias(snapshot_text)
+    notion_url = log_snapshot_to_notion(snapshot_text, data2, flags, tag, asset)
 
-    append_to_jsonl(data2, flags, tag, notion_url)
+    append_to_jsonl(data2, flags, tag, notion_url, bias=bias, asset=asset)
 
     if suspect:
         open_github_issue(flags, data2, notion_url, tag)
@@ -349,7 +415,42 @@ def run_verified_snapshot(tag: str = "scheduled") -> tuple[str, list[str]]:
     if notion_url:
         snapshot_text += f"\n\n📓 _Logged to Notion_"
 
+    # Write market regime to Redis for consumption by other systems
+    _publish_regime(bias, data2, asset)
+
     return snapshot_text, flags
+
+
+_BIAS_TO_REGIME = {
+    "Bullish":  "BULL",
+    "Bearish":  "BEAR",
+    "Sideways": "CRAB",
+    "Neutral":  "CRAB",
+}
+_REDIS = None
+
+def _get_redis():
+    global _REDIS
+    if _REDIS is None:
+        _REDIS = _redis_lib.Redis(host="localhost", port=6379, db=0)
+    return _REDIS
+
+def _publish_regime(bias: str, data: dict, asset: str = "BTC") -> None:
+    regime = _BIAS_TO_REGIME.get(bias, "CRAB")
+    meta = {
+        "regime":    regime,
+        "bias":      bias,
+        "asset":     asset,
+        "price":     data.get("binance", {}).get("price"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        r = _get_redis()
+        r.setex("market:regime",      14400, regime)           # 4h TTL
+        r.setex("market:regime_meta", 14400, json.dumps(meta))
+        print(f"[REGIME] Published {regime} (bias={bias}, asset={asset}) → Redis market:regime")
+    except Exception as e:
+        print(f"[REGIME] Redis write failed: {e}")
 
 
 if __name__ == "__main__":

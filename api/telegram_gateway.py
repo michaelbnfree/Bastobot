@@ -1,4 +1,5 @@
 import telebot
+import telebot.apihelper
 import os
 import sys
 import subprocess
@@ -11,6 +12,8 @@ import redis
 from PIL import Image
 
 sys.path.insert(0, '/root/bastobot')
+
+telebot.apihelper.READ_TIMEOUT = 90
 
 _redis = redis.Redis(host='localhost', port=6379, db=0)
 
@@ -37,6 +40,12 @@ bot = telebot.TeleBot(TOKEN)
 print("Barry is awake and listening...")
 
 
+def _send_long(chat_id, text, chunk_size=4000):
+    """Send a message, splitting into chunks if it exceeds Telegram's 4096-char limit."""
+    for i in range(0, len(text), chunk_size):
+        bot.send_message(chat_id, text[i:i + chunk_size])
+
+
 def poll_and_reply(job_id, chat_id):
     for _ in range(60):  # 5 min at 5s intervals
         time.sleep(5)
@@ -44,7 +53,7 @@ def poll_and_reply(job_id, chat_id):
             res = requests.get(f"{API_BASE}/result/{job_id}", timeout=5)
             data = res.json()
             if data.get("status") == "complete":
-                bot.send_message(chat_id, data["response"])
+                _send_long(chat_id, data["response"])
                 return
             if data.get("status") in ("failed", "error"):
                 bot.send_message(chat_id, f"❌ Job failed: {data.get('message', 'unknown error')}")
