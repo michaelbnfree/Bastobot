@@ -61,22 +61,57 @@ Bias: [one line — direction + condition needed to confirm]
 - Bullish flip: [trigger] → [target]
 - Bearish flip: [trigger] → [target]
 
-[If a clear setup exists, add one line: the trade, entry zone, target, invalidation.]
+Trade Setup:
+- Entry: $[zone or price]
+- SL: $[level] ([reason — key support/resistance or invalidation point])
+- TP1: $[level] ([first target — nearest resistance or measured move])
+- TP2: $[level] ([extended target — if momentum holds])
 
-For trade setup requests (entry/target/invalidation), lead with the setup bias then give Entry, Target(s), Invalidation each on their own line, supported by the most relevant data points.
+For trade setup requests, lead with the setup bias then give Entry, SL, TP1, and TP2 each on their own line, supported by the most relevant data points.
 
 For simple price questions, give a direct 2-3 line answer. Always lead with the conclusion. No filler."""
 
-def _fetch_market_data():
+_KNOWN_ASSETS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK",
+    "MATIC", "UNI", "ATOM", "LTC", "BCH", "NEAR", "APT", "SUI", "OP", "ARB",
+    "INJ", "TIA", "PEPE", "WIF", "BONK", "TON", "SHIB", "TRX", "HBAR",
+]
+_ASSET_NAME_MAP = {
+    "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", "BINANCE": "BNB",
+    "RIPPLE": "XRP", "DOGECOIN": "DOGE", "CARDANO": "ADA", "AVALANCHE": "AVAX",
+    "POLKADOT": "DOT", "CHAINLINK": "LINK", "POLYGON": "MATIC", "UNISWAP": "UNI",
+    "COSMOS": "ATOM", "LITECOIN": "LTC", "TONCOIN": "TON", "TRON": "TRX",
+    "SHIBA": "SHIB",
+}
+
+def _detect_asset(prompt: str) -> str:
+    if not prompt:
+        return "BTC"
+    upper = prompt.upper()
+    # Check full-word ticker matches first (longest first to avoid BNB matching inside BONK etc.)
+    words = set(upper.split())
+    for asset in sorted(_KNOWN_ASSETS, key=len, reverse=True):
+        if asset in words:
+            return asset
+    # Substring match as fallback
+    for name, ticker in _ASSET_NAME_MAP.items():
+        if name in upper:
+            return ticker
+    return "BTC"
+
+
+def _fetch_market_data(asset="BTC"):
     try:
-        from skills.trading import get_btc_analysis
-        from skills.time import get_time_context
-        d = get_btc_analysis()
+        from skills.trading import get_btc_analysis, get_asset_analysis
+        if asset == "BTC":
+            d = get_btc_analysis()
+        else:
+            d = get_asset_analysis(asset)
         if not isinstance(d, dict):
             return None
 
         from datetime import datetime
-        lines = [f"[LIVE MARKET DATA — BTC/USDT — {datetime.utcnow().strftime('%b %d, %Y %H:%M UTC')}]"]
+        lines = [f"[LIVE MARKET DATA — {asset}/USDT — {datetime.utcnow().strftime('%b %d, %Y %H:%M UTC')}]"]
 
         # --- Price ---
         if "binance" in d:
@@ -144,17 +179,26 @@ def _fetch_market_data():
         # --- Binance Futures derivatives ---
         if "derivatives" in d:
             dv = d["derivatives"]
-            lines.append(
+            funding_line = (
                 f"Binance Funding: {dv['funding_rate_pct']:+.4f}%  "
-                f"Mark: ${dv['mark_price']:,.2f}  Premium: {dv['premium_pct']:+.4f}%"
+                f"Mark: ${dv['mark_price']:,.2f}"
             )
-            lines.append(
-                f"Global L/S: {dv['global_ls_ratio']:.3f} "
-                f"({dv['global_longs_pct']}% long / {dv['global_shorts_pct']}% short)  "
-                f"Top Traders: {dv['top_trader_ls_ratio']:.3f} "
-                f"({dv['top_trader_longs_pct']}% long / {dv['top_trader_shorts_pct']}% short)"
-            )
-            lines.append(f"Taker Buy/Sell: {dv['taker_buy_sell_ratio']:.4f}")
+            if "premium_pct" in dv:
+                funding_line += f"  Premium: {dv['premium_pct']:+.4f}%"
+            lines.append(funding_line)
+            if "global_ls_ratio" in dv:
+                ls_line = (
+                    f"Global L/S: {dv['global_ls_ratio']:.3f} "
+                    f"({dv['global_longs_pct']}% long / {dv['global_shorts_pct']}% short)"
+                )
+                if "top_trader_ls_ratio" in dv:
+                    ls_line += (
+                        f"  Top Traders: {dv['top_trader_ls_ratio']:.3f} "
+                        f"({dv['top_trader_longs_pct']}% long / {dv['top_trader_shorts_pct']}% short)"
+                    )
+                lines.append(ls_line)
+            if "taker_buy_sell_ratio" in dv:
+                lines.append(f"Taker Buy/Sell: {dv['taker_buy_sell_ratio']:.4f}")
 
         # --- Bybit + OKX funding/L/S ---
         if "bybit" in d:
@@ -217,8 +261,10 @@ def _build_content(prompt, category, image_b64, mime_type):
             {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}}
         ]
     if category == 'financial':
-        market = _fetch_market_data()
-        base = f"{TRADING_INSTRUCTION}\n\n{prompt}".strip()
+        asset = _detect_asset(prompt)
+        instruction = TRADING_INSTRUCTION.replace("BTC", asset)
+        market = _fetch_market_data(asset)
+        base = f"{instruction}\n\n{prompt}".strip()
         return f"{base}\n\n{market}" if market else base
     if category == 'vision':
         return f"{TRADING_INSTRUCTION}\n\n{prompt}".strip()
@@ -275,7 +321,8 @@ def process_task(prompt, category=None, *args, image_b64=None, mime_type="image/
     if category == "financial" and not image_b64 and _is_snapshot_request(prompt):
         try:
             from skills.snapshot_logger import run_verified_snapshot
-            result, flags = run_verified_snapshot(tag="manual")
+            asset = _detect_asset(prompt)
+            result, flags = run_verified_snapshot(tag="manual", asset=asset)
             record_timing("financial", time.time() - start)
             return result
         except Exception as e:

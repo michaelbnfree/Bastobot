@@ -231,10 +231,14 @@ def _get_liquidations():
                     short_usd += usd_val
         return long_usd, short_usd, buckets
 
+    # Hard bounds on BTC liquidation prices — anything outside is bad data
+    BTC_PRICE_MIN = 5_000
+    BTC_PRICE_MAX = 500_000
+
     def _parse_gateio(from_s, to_s):
         long_usd = short_usd = 0.0
         buckets: dict[int, float] = {}
-        # Gate.io requires max 1h window per request; fetch most recent 1h only
+        skipped = 0
         window_end = to_s
         window_start = max(from_s, to_s - 3600)
         r = requests.get(
@@ -242,13 +246,14 @@ def _get_liquidations():
             f"?contract=BTC_USDT&from={window_start}&to={window_end}&limit=100",
             timeout=10,
         )
-        # BTC_USDT quanto_multiplier = 0.0001 (each contract = 0.0001 BTC)
-        # size > 0 = long liquidated; size < 0 = short liquidated
-        QUANTO = 0.0001
+        QUANTO = 0.0001  # each contract = 0.0001 BTC
         for o in (r.json() if isinstance(r.json(), list) else []):
             px = float(o.get("fill_price") or o.get("order_price") or 0)
             raw_size = float(o.get("size", 0))
             if not px or not raw_size:
+                continue
+            if not (BTC_PRICE_MIN <= px <= BTC_PRICE_MAX):
+                skipped += 1
                 continue
             usd_val = abs(raw_size) * QUANTO * px
             bucket = int(px // 500) * 500
@@ -257,12 +262,28 @@ def _get_liquidations():
                 long_usd += usd_val
             else:
                 short_usd += usd_val
+        if skipped:
+            print(f"[LIQ] Gate.io: skipped {skipped} orders with out-of-bounds price")
         return long_usd, short_usd, buckets
 
     # Current 24h window
     ll, ls, lb = _parse_okx(now_ms - period_24h)
     gl, gs, gb = _parse_gateio(now_s - 86400, now_s)
-    total_long = ll + gl
+
+    # Cross-source consistency check — if one source is >10x the other, exclude the outlier
+    okx_total  = ll + ls
+    gate_total = gl + gs
+    gate_excluded = False
+    if okx_total > 0 and gate_total > 0:
+        ratio = max(okx_total, gate_total) / min(okx_total, gate_total)
+        if ratio > 10:
+            # Trust OKX; zero out Gate.io contribution
+            gl = gs = 0.0
+            gb = {}
+            gate_excluded = True
+            print(f"[LIQ] Gate.io excluded: ratio vs OKX={ratio:.1f}x (okx=${okx_total:,.0f}  gate=${gate_total:,.0f})")
+
+    total_long  = ll + gl
     total_short = ls + gs
 
     # Previous 24h window (for % change) — only OKX has enough data
@@ -279,11 +300,14 @@ def _get_liquidations():
     clusters = [f"${z:,}–${z+500:,} (${v:,.0f})" for z, v in top_zones]
 
     return {
-        "longs_liq_usd": round(total_long),
-        "shorts_liq_usd": round(total_short),
-        "total_liq_usd": round(curr_total),
-        "change_pct": change_pct,
-        "top_liq_zones": clusters,
+        "longs_liq_usd":   round(total_long),
+        "shorts_liq_usd":  round(total_short),
+        "total_liq_usd":   round(curr_total),
+        "change_pct":      change_pct,
+        "top_liq_zones":   clusters,
+        "okx_liq_usd":     round(okx_total),
+        "gate_liq_usd":    round(gate_total),
+        "gate_excluded":   gate_excluded,
     }
 
 
@@ -355,4 +379,107 @@ def get_btc_analysis():
                 result[key] = val
         except Exception as e:
             result[f"{key}_error"] = str(e)
+    return result
+
+
+def get_asset_analysis(symbol: str) -> dict:
+    """Generic analysis for any crypto asset — spot price, multi-TF TA, basic futures."""
+    sym = symbol.upper()
+    pair = f"{sym}USDT"
+    result = {}
+
+    # Spot price
+    try:
+        d = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={pair}", timeout=10).json()
+        klines = requests.get(
+            f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1d&limit=9", timeout=10
+        ).json()
+        price_7d_ago = float(klines[0][4])
+        vol_yesterday = float(klines[-2][7])
+        vol_day_before = float(klines[-3][7])
+        vol_change_pct = (vol_yesterday / vol_day_before - 1) * 100 if vol_day_before else 0
+        result["binance"] = {
+            "price": float(d["lastPrice"]),
+            "change_24h_pct": float(d["priceChangePercent"]),
+            "change_7d_pct": round((float(d["lastPrice"]) / price_7d_ago - 1) * 100, 2),
+            "high_24h": float(d["highPrice"]),
+            "low_24h": float(d["lowPrice"]),
+            "volume_24h_usdt": float(d["quoteVolume"]),
+            "volume_yesterday_usdt": vol_yesterday,
+            "volume_change_pct": round(vol_change_pct, 1),
+        }
+    except Exception as e:
+        result["binance_error"] = str(e)
+
+    # Multi-TF TradingView TA
+    try:
+        ta_results = {}
+        for label, interval in [
+            ("1h", Interval.INTERVAL_1_HOUR),
+            ("4h", Interval.INTERVAL_4_HOURS),
+            ("1d", Interval.INTERVAL_1_DAY),
+        ]:
+            h = TA_Handler(symbol=pair, screener="crypto", exchange="BINANCE", interval=interval)
+            a = h.get_analysis()
+            bb_upper = a.indicators.get("BB.upper")
+            bb_lower = a.indicators.get("BB.lower")
+            bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
+            ta_results[label] = {
+                "summary": a.summary,
+                "rsi": round(a.indicators["RSI"], 2),
+                "macd": round(a.indicators["MACD.macd"], 4),
+                "macd_signal": round(a.indicators["MACD.signal"], 4),
+                "adx": round(a.indicators["ADX"], 2),
+                "ema_20": round(a.indicators["EMA20"], 2),
+                "ema_50": round(a.indicators["EMA50"], 2),
+                "ema_200": round(a.indicators["EMA200"], 2),
+                "bb_upper": round(bb_upper, 2) if bb_upper else None,
+                "bb_lower": round(bb_lower, 2) if bb_lower else None,
+                "bb_basis": bb_basis,
+            }
+        result["ta"] = ta_results
+    except Exception as e:
+        result["ta_error"] = str(e)
+
+    # Binance Futures (funding, OI, L/S) — skip silently if perp doesn't exist
+    try:
+        BASE = "https://fapi.binance.com"
+        d = requests.get(f"{BASE}/fapi/v1/premiumIndex?symbol={pair}", timeout=10).json()
+        if "lastFundingRate" in d:
+            out = {
+                "funding_rate_pct": round(float(d["lastFundingRate"]) * 100, 4),
+                "mark_price": round(float(d["markPrice"]), 2),
+            }
+            oi = requests.get(f"{BASE}/fapi/v1/openInterest?symbol={pair}", timeout=10).json()
+            out["oi_contracts"] = round(float(oi["openInterest"]), 0)
+
+            oi_hist = requests.get(
+                f"{BASE}/futures/data/openInterestHist?symbol={pair}&period=1h&limit=25", timeout=10
+            ).json()
+            oi_now = round(float(oi_hist[-1]["sumOpenInterestValue"]) / 1e9, 2)
+            oi_24h = round(float(oi_hist[0]["sumOpenInterestValue"]) / 1e9, 2)
+            out["oi_usd_bn"] = oi_now
+            out["oi_change_24h_pct"] = round((oi_now / oi_24h - 1) * 100, 2) if oi_24h else 0
+
+            ls = requests.get(
+                f"{BASE}/futures/data/globalLongShortAccountRatio?symbol={pair}&period=1h&limit=1",
+                timeout=10,
+            ).json()[0]
+            out["global_ls_ratio"] = float(ls["longShortRatio"])
+            out["global_longs_pct"] = round(float(ls["longAccount"]) * 100, 1)
+            out["global_shorts_pct"] = round(float(ls["shortAccount"]) * 100, 1)
+            result["derivatives"] = out
+    except Exception:
+        pass
+
+    # Fear & Greed + global market (asset-agnostic)
+    try:
+        result["fear_greed"] = _get_fear_greed()
+    except Exception:
+        pass
+    try:
+        result["market"] = _get_coingecko_global()
+    except Exception:
+        pass
+
     return result
