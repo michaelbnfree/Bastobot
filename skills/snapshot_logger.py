@@ -361,9 +361,10 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: s
     import sys
     sys.path.insert(0, '/root/bastobot')
     from skills.trading import get_btc_analysis, get_asset_analysis
-    from workers.tasks import _fetch_market_data, _call_model, TEXT_MODELS, build_snapshot_instruction
+    from workers.tasks import _fetch_market_data, _call_model, TEXT_MODELS, build_snapshot_instruction, _HORIZON_META
 
-    fetch = get_btc_analysis if asset == "BTC" else lambda: get_asset_analysis(asset)
+    candles = _HORIZON_META.get(horizon, _HORIZON_META["swing"])["candles"]
+    fetch = (lambda: get_btc_analysis(candles=candles)) if asset == "BTC" else (lambda: get_asset_analysis(asset, candles=candles))
 
     print(f"[SNAPSHOT] Call 1 of 2 (tag={tag}, asset={asset})")
     data1 = fetch()
@@ -394,7 +395,7 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: s
                     scrubbed.pop(src, None)
                     print(f"[SNAPSHOT] {src} data scrubbed from prompt due to 🚨 funding flag")
 
-    market_text = _fetch_market_data(asset)
+    market_text = _fetch_market_data(asset, candles=candles)
     flag_header = ""
     if flags:
         icon = "🚨 SUSPECT DATA — some sources scrubbed" if suspect else "⚠️ DATA FLAGS"
