@@ -435,20 +435,35 @@ def _get_redis():
         _REDIS = _redis_lib.Redis(host="localhost", port=6379, db=0)
     return _REDIS
 
+def _ta_to_regime(rec: str) -> str:
+    u = (rec or "").upper()
+    if "BUY" in u:  return "BULL"
+    if "SELL" in u: return "BEAR"
+    return "CRAB"
+
 def _publish_regime(bias: str, data: dict, asset: str = "BTC") -> None:
     regime = _BIAS_TO_REGIME.get(bias, "CRAB")
+
+    ta   = data.get("ta", {})
+    r_1h = _ta_to_regime(ta.get("1h", {}).get("summary", {}).get("RECOMMENDATION", ""))
+    r_4h = _ta_to_regime(ta.get("4h", {}).get("summary", {}).get("RECOMMENDATION", ""))
+
     meta = {
-        "regime":    regime,
-        "bias":      bias,
-        "asset":     asset,
-        "price":     data.get("binance", {}).get("price"),
+        "regime":     regime,
+        "regime_1h":  r_1h,
+        "regime_4h":  r_4h,
+        "bias":       bias,
+        "asset":      asset,
+        "price":      data.get("binance", {}).get("price"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
         r = _get_redis()
         r.setex("market:regime",      14400, regime)           # 4h TTL
+        r.setex("market:regime:1h",   14400, r_1h)
+        r.setex("market:regime:4h",   14400, r_4h)
         r.setex("market:regime_meta", 14400, json.dumps(meta))
-        print(f"[REGIME] Published {regime} (bias={bias}, asset={asset}) → Redis market:regime")
+        print(f"[REGIME] Published overall={regime} 1h={r_1h} 4h={r_4h} (bias={bias}, asset={asset})")
     except Exception as e:
         print(f"[REGIME] Redis write failed: {e}")
 

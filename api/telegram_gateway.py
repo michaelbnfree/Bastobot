@@ -47,7 +47,7 @@ def _send_long(chat_id, text, chunk_size=4000):
 
 
 def poll_and_reply(job_id, chat_id):
-    for _ in range(60):  # 5 min at 5s intervals
+    for _ in range(120):  # 10 min at 5s intervals
         time.sleep(5)
         try:
             res = requests.get(f"{API_BASE}/result/{job_id}", timeout=5)
