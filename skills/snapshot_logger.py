@@ -353,7 +353,7 @@ def open_github_issue(flags: list[str], data: dict, notion_url: str | None, tag:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC") -> tuple[str, list[str]]:
+def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: str = "swing") -> tuple[str, list[str]]:
     """
     Two API calls 60s apart. Returns (snapshot_text, flags).
     Logs to Notion, JSONL, and GitHub (if suspect).
@@ -361,7 +361,7 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC") -> tuple[s
     import sys
     sys.path.insert(0, '/root/bastobot')
     from skills.trading import get_btc_analysis, get_asset_analysis
-    from workers.tasks import _fetch_market_data, _call_model, TEXT_MODELS, TRADING_INSTRUCTION
+    from workers.tasks import _fetch_market_data, _call_model, TEXT_MODELS, build_snapshot_instruction
 
     fetch = get_btc_analysis if asset == "BTC" else lambda: get_asset_analysis(asset)
 
@@ -400,9 +400,27 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC") -> tuple[s
         icon = "🚨 SUSPECT DATA — some sources scrubbed" if suspect else "⚠️ DATA FLAGS"
         flag_header = f"[{icon}: {'; '.join(flags)}]\n\n"
 
-    instruction = TRADING_INSTRUCTION.replace("BTC", asset)
-    prompt = f"{instruction}\n\n{flag_header}{asset.lower()} snapshot\n\n{market_text}"
+    prev_idea = _get_prev_trade_idea(asset)
+    prev_context = ""
+    if prev_idea:
+        try:
+            then = datetime.fromisoformat(prev_idea["ts"])
+            mins = int((datetime.now(timezone.utc) - then).total_seconds() / 60)
+            prev_context = (
+                f"[PRIOR TRADE IDEA — {mins}min ago, {asset} was ${prev_idea['price']:,.0f}, "
+                f"horizon={prev_idea['horizon']}]\n"
+                f"{prev_idea['text']}\n\n"
+                f"Assess whether the above remains valid given current data. "
+                f"If conditions changed materially, explain what changed and update the setup. "
+                f"If still valid, confirm it explicitly rather than silently generating a contradictory one.\n\n"
+            )
+        except Exception:
+            pass
+
+    instruction = build_snapshot_instruction(horizon, asset)
+    prompt = f"{instruction}\n\n{flag_header}{prev_context}{asset.lower()} snapshot\n\n{market_text}"
     snapshot_text = _call_model(TEXT_MODELS, prompt)
+    _store_trade_idea(snapshot_text, data2, asset, horizon)
 
     bias = _extract_bias(snapshot_text)
     notion_url = log_snapshot_to_notion(snapshot_text, data2, flags, tag, asset)
@@ -434,6 +452,32 @@ def _get_redis():
     if _REDIS is None:
         _REDIS = _redis_lib.Redis(host="localhost", port=6379, db=0)
     return _REDIS
+
+
+def _get_prev_trade_idea(asset: str) -> dict | None:
+    try:
+        raw = _get_redis().get(f"trade_idea:{asset}")
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _store_trade_idea(text: str, data: dict, asset: str, horizon: str) -> None:
+    try:
+        match = re.search(r'(━━━ PRIMARY SETUP.*)', text, re.DOTALL)
+        if not match:
+            return
+        setup_text = match.group(1).strip()[:900]
+        payload = {
+            "ts":      datetime.now(timezone.utc).isoformat(),
+            "price":   data.get("binance", {}).get("price"),
+            "horizon": horizon,
+            "text":    setup_text,
+        }
+        _get_redis().setex(f"trade_idea:{asset}", 86400, json.dumps(payload))
+        print(f"[TRADE] Cached {horizon} setup for {asset}")
+    except Exception as e:
+        print(f"[TRADE] Cache failed: {e}")
 
 def _ta_to_regime(rec: str) -> str:
     u = (rec or "").upper()
