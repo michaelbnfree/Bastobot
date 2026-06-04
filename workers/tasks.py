@@ -100,6 +100,112 @@ def _detect_asset(prompt: str) -> str:
     return "BTC"
 
 
+_HORIZON_SCALP    = "scalp"
+_HORIZON_DAY      = "day"
+_HORIZON_SWING    = "swing"
+_HORIZON_POSITION = "position"
+
+_HORIZON_KEYWORDS = {
+    _HORIZON_SCALP:    ("scalp", "quick trade", "quick entry"),
+    _HORIZON_DAY:      ("day trade", "daytrade", "intraday", "day-trade"),
+    _HORIZON_POSITION: ("position trade", "long term", "weekly trade", "macro trade"),
+}
+
+def _detect_trade_horizon(prompt: str) -> str:
+    if not prompt:
+        return _HORIZON_SWING
+    p = prompt.lower()
+    for horizon, keywords in _HORIZON_KEYWORDS.items():
+        if any(kw in p for kw in keywords):
+            return horizon
+    return _HORIZON_SWING
+
+_HORIZON_META = {
+    _HORIZON_SCALP: {
+        "label":    "SCALP",
+        "duration": "15min–2h",
+        "focus":    "1h RSI extremes, recent liquidation clusters, micro-structure momentum",
+        "valid":    "2–4h — reassess on any 1h close outside entry zone",
+    },
+    _HORIZON_DAY: {
+        "label":    "DAY TRADE",
+        "duration": "2h–24h",
+        "focus":    "4h trend direction, 1h entry trigger, intraday key levels",
+        "valid":    "12–24h — reassess on 4h close against the position",
+    },
+    _HORIZON_SWING: {
+        "label":    "SWING",
+        "duration": "2–7 days",
+        "focus":    "1D trend structure, weekly key levels, funding rate trend, OI direction",
+        "valid":    "24–72h — reassess on 1D close outside key structure",
+    },
+    _HORIZON_POSITION: {
+        "label":    "POSITION",
+        "duration": "1–4 weeks",
+        "focus":    "1W trend, macro regime, sustained funding anomaly, major structural levels",
+        "valid":    "weekly — reassess on weekly close against key level",
+    },
+}
+
+def build_snapshot_instruction(horizon: str, asset: str = "BTC") -> str:
+    meta = _HORIZON_META.get(horizon, _HORIZON_META[_HORIZON_SWING])
+    a = asset
+    return f"""You are a sharp, no-fluff crypto derivatives analyst. Use all live market data provided.
+
+Respond in exactly this format (no extra sections, no disclaimers):
+
+{a} Snapshot — [Month DD, YYYY]
+
+Price: $[price] ([+/-X.XX%] 24h, [+/-X.XX%] 7d). [One sentence on macro context.]
+
+Key levels:
+- Resistance: $[level] ([reason]), $[level] ([reason])
+- Support: $[level] ([reason]), $[level] ([reason])
+
+Trend:
+- 1h: [brief read — range, direction, volume context]
+- 4h: [brief read]
+- 1d: [brief read — higher highs/lows, key EMA relationships]
+
+Indicators:
+- RSI [value] — [label: neutral/overbought/oversold]
+- Volume $[XB], [+/-X%] — [one-word conviction label]
+- Bollinger [position relative to bands] — [compression/expansion note]
+
+Derivatives:
+- Funding: [exchanges + rates] — [interpretation]
+- OI $[XB] ([+/-X%]) — [label]
+- Liquidations $[XM] ([+/-X%]) — [label]
+- L/S ratio: [global]/[top traders] — [interpretation]
+- Fear & Greed: [score] ([label] — [contrarian note if relevant])
+
+Bias: [one line — direction + condition needed to confirm]
+- Bullish flip: [trigger] → [target]
+- Bearish flip: [trigger] → [target]
+
+━━━ PRIMARY SETUP — {meta['label']} ━━━
+Horizon:    {meta['duration']}
+Valid for:  {meta['valid']}
+
+Entry:       $[zone or level]
+SL:          $[level] ([invalidation reason])
+TP1:         $[level] ([nearest target]) → on hit: move SL to $[near-entry + small buffer]
+TP2:         $[level] ([extended target — if momentum holds])
+R:R:         [X:X to TP1] / [X:X to TP2]
+Conviction:  [High / Medium / Low] — [one-line: which signals align]
+
+[Only include this section if a materially stronger setup exists at a different timeframe. Omit entirely if nothing stands out.]
+⭐ BONUS HIGH-CONVICTION SETUP — [SWING / POSITION / DAY / SCALP]
+Entry:  $[zone]
+SL:     $[level]
+TP1:    $[level] → move SL to $[near-entry]
+TP2:    $[level]
+R:R:    [X:X to TP1] / [X:X to TP2]
+Why:    [2–3 signals: timeframe alignment, derivatives confirmation, structure]
+
+For simple price questions, give a direct 2-3 line answer. Always lead with the conclusion. No filler."""
+
+
 def _fetch_market_data(asset="BTC"):
     try:
         from skills.trading import get_btc_analysis, get_asset_analysis
@@ -321,8 +427,9 @@ def process_task(prompt, category=None, *args, image_b64=None, mime_type="image/
     if category == "financial" and not image_b64 and _is_snapshot_request(prompt):
         try:
             from skills.snapshot_logger import run_verified_snapshot
-            asset = _detect_asset(prompt)
-            result, flags = run_verified_snapshot(tag="manual", asset=asset)
+            asset   = _detect_asset(prompt)
+            horizon = _detect_trade_horizon(prompt)
+            result, flags = run_verified_snapshot(tag="manual", asset=asset, horizon=horizon)
             record_timing("financial", time.time() - start)
             return result
         except Exception as e:
