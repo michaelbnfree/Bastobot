@@ -4,6 +4,16 @@ import requests
 from tradingview_ta import TA_Handler, Interval
 from dotenv import load_dotenv
 
+_INTERVAL_MAP = {
+    "5m":  Interval.INTERVAL_5_MINUTES,
+    "15m": Interval.INTERVAL_15_MINUTES,
+    "30m": Interval.INTERVAL_30_MINUTES,
+    "1h":  Interval.INTERVAL_1_HOUR,
+    "4h":  Interval.INTERVAL_4_HOURS,
+    "1d":  Interval.INTERVAL_1_DAY,
+    "1w":  Interval.INTERVAL_1_WEEK,
+}
+
 load_dotenv('/root/bastobot/.env')
 
 COINGLASS_KEY = os.getenv("COINGLASS_API_KEY")
@@ -36,13 +46,10 @@ def _get_binance_price():
     }
 
 
-def _get_tv_indicators():
+def _get_tv_indicators(candles=None):
+    tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
     results = {}
-    for label, interval in [
-        ("1h", Interval.INTERVAL_1_HOUR),
-        ("4h", Interval.INTERVAL_4_HOURS),
-        ("1d", Interval.INTERVAL_1_DAY),
-    ]:
+    for label, interval in tfs:
         h = TA_Handler(symbol="BTCUSDT", screener="crypto", exchange="BINANCE", interval=interval)
         a = h.get_analysis()
         bb_upper = a.indicators.get("BB.upper")
@@ -357,11 +364,11 @@ def _get_sosovalue():
     return None
 
 
-def get_btc_analysis():
+def get_btc_analysis(candles=None):
     result = {}
     sources = [
         ("binance", _get_binance_price),
-        ("ta", _get_tv_indicators),
+        ("ta", lambda: _get_tv_indicators(candles)),
         ("derivatives", _get_derivatives),
         ("bybit", _get_bybit),
         ("okx", _get_okx),
@@ -382,7 +389,7 @@ def get_btc_analysis():
     return result
 
 
-def get_asset_analysis(symbol: str) -> dict:
+def get_asset_analysis(symbol: str, candles=None) -> dict:
     """Generic analysis for any crypto asset — spot price, multi-TF TA, basic futures."""
     sym = symbol.upper()
     pair = f"{sym}USDT"
@@ -414,11 +421,8 @@ def get_asset_analysis(symbol: str) -> dict:
     # Multi-TF TradingView TA
     try:
         ta_results = {}
-        for label, interval in [
-            ("1h", Interval.INTERVAL_1_HOUR),
-            ("4h", Interval.INTERVAL_4_HOURS),
-            ("1d", Interval.INTERVAL_1_DAY),
-        ]:
+        tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
+        for label, interval in tfs:
             h = TA_Handler(symbol=pair, screener="crypto", exchange="BINANCE", interval=interval)
             a = h.get_analysis()
             bb_upper = a.indicators.get("BB.upper")

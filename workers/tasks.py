@@ -126,31 +126,43 @@ _HORIZON_META = {
         "duration": "15min–2h",
         "focus":    "1h RSI extremes, recent liquidation clusters, micro-structure momentum",
         "valid":    "2–4h — reassess on any 1h close outside entry zone",
+        "candles":  ("5m", "15m", "1h"),
+        "lookback": "24h",
     },
     _HORIZON_DAY: {
         "label":    "DAY TRADE",
         "duration": "2h–24h",
         "focus":    "4h trend direction, 1h entry trigger, intraday key levels",
         "valid":    "12–24h — reassess on 4h close against the position",
+        "candles":  ("30m", "1h", "4h"),
+        "lookback": "7d",
     },
     _HORIZON_SWING: {
         "label":    "SWING",
         "duration": "2–7 days",
         "focus":    "1D trend structure, weekly key levels, funding rate trend, OI direction",
         "valid":    "24–72h — reassess on 1D close outside key structure",
+        "candles":  ("4h", "1d"),
+        "lookback": "30d",
     },
     _HORIZON_POSITION: {
         "label":    "POSITION",
         "duration": "1–4 weeks",
         "focus":    "1W trend, macro regime, sustained funding anomaly, major structural levels",
         "valid":    "weekly — reassess on weekly close against key level",
+        "candles":  ("1d", "1w"),
+        "lookback": "90d",
     },
 }
 
 def build_snapshot_instruction(horizon: str, asset: str = "BTC") -> str:
     meta = _HORIZON_META.get(horizon, _HORIZON_META[_HORIZON_SWING])
     a = asset
+    candles = meta["candles"]
+    lookback = meta["lookback"]
+    trend_lines = "\n".join(f"- {c}: [brief read]" for c in candles)
     return f"""You are a sharp, no-fluff crypto derivatives analyst. Use all live market data provided.
+Data covers the last {lookback}. Focus analysis on the {'/'.join(c.upper() for c in candles)} timeframes.
 
 Respond in exactly this format (no extra sections, no disclaimers):
 
@@ -163,9 +175,7 @@ Key levels:
 - Support: $[level] ([reason]), $[level] ([reason])
 
 Trend:
-- 1h: [brief read — range, direction, volume context]
-- 4h: [brief read]
-- 1d: [brief read — higher highs/lows, key EMA relationships]
+{trend_lines}
 
 Indicators:
 - RSI [value] — [label: neutral/overbought/oversold]
@@ -206,13 +216,13 @@ Why:    [2–3 signals: timeframe alignment, derivatives confirmation, structure
 For simple price questions, give a direct 2-3 line answer. Always lead with the conclusion. No filler."""
 
 
-def _fetch_market_data(asset="BTC"):
+def _fetch_market_data(asset="BTC", candles=None):
     try:
         from skills.trading import get_btc_analysis, get_asset_analysis
         if asset == "BTC":
-            d = get_btc_analysis()
+            d = get_btc_analysis(candles=candles)
         else:
-            d = get_asset_analysis(asset)
+            d = get_asset_analysis(asset, candles=candles)
         if not isinstance(d, dict):
             return None
 
