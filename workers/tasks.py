@@ -216,13 +216,15 @@ Why:    [2–3 signals: timeframe alignment, derivatives confirmation, structure
 For simple price questions, give a direct 2-3 line answer. Always lead with the conclusion. No filler."""
 
 
-def _fetch_market_data(asset="BTC", candles=None):
+def _fetch_market_data(asset="BTC", candles=None, data=None):
     try:
-        from skills.trading import get_btc_analysis, get_asset_analysis
-        if asset == "BTC":
-            d = get_btc_analysis(candles=candles)
-        else:
-            d = get_asset_analysis(asset, candles=candles)
+        if data is None:
+            from skills.trading import get_btc_analysis, get_asset_analysis
+            if asset == "BTC":
+                data = get_btc_analysis(candles=candles)
+            else:
+                data = get_asset_analysis(asset, candles=candles)
+        d = data
         if not isinstance(d, dict):
             return None
 
@@ -244,11 +246,9 @@ def _fetch_market_data(asset="BTC", candles=None):
                 f"Change vs prior day: {vol_chg}"
             )
 
-        # --- Multi-timeframe TA ---
+        # --- Multi-timeframe TA (iterate actual keys — respects horizon candles) ---
         if "ta" in d:
-            for tf in ("1h", "4h", "1d"):
-                if tf not in d["ta"]:
-                    continue
+            for tf in d["ta"]:
                 ta = d["ta"][tf]
                 sig = ta["summary"].get("RECOMMENDATION", "N/A")
                 bb = ""

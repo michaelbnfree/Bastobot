@@ -366,36 +366,57 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: s
     candles = _HORIZON_META.get(horizon, _HORIZON_META["swing"])["candles"]
     fetch = (lambda: get_btc_analysis(candles=candles)) if asset == "BTC" else (lambda: get_asset_analysis(asset, candles=candles))
 
-    print(f"[SNAPSHOT] Call 1 of 2 (tag={tag}, asset={asset})")
-    data1 = fetch()
+    # ── Phase 1: discard call to bust upstream caches ─────────────────────────
+    print(f"[SNAPSHOT] Discard call (cache buster, tag={tag}, asset={asset})")
+    fetch()
+    print("[SNAPSHOT] Waiting 10s after discard...")
+    time.sleep(10)
 
-    print("[SNAPSHOT] Waiting 60s for call 2...")
-    time.sleep(60)
+    # ── Phase 2: two real measurements 30s apart ───────────────────────────────
+    print("[SNAPSHOT] Call A of 2")
+    data_a = fetch()
+    print("[SNAPSHOT] Waiting 30s for call B...")
+    time.sleep(30)
+    print("[SNAPSHOT] Call B of 2")
+    data_b = fetch()
 
-    print("[SNAPSHOT] Call 2 of 2")
-    data2 = fetch()
-
-    flags = validate_snapshot(data1, data2)
+    # ── Phase 3: validate; one retry if suspect ────────────────────────────────
+    flags = validate_snapshot(data_a, data_b)
     suspect = any("🚨" in f for f in flags)
 
-    # Use call-2 data for the snapshot (more recent), but scrub suspect sources
-    scrubbed = dict(data2)
     if suspect:
-        # Identify which sources are flagged and remove them from the data block
+        print("[SNAPSHOT] Suspect data — retrying with call C...")
+        time.sleep(10)
+        data_c = fetch()
+        flags_bc = validate_snapshot(data_b, data_c)
+        if not any("🚨" in f for f in flags_bc):
+            print("[SNAPSHOT] Call C clean — using B+C pair")
+            data_a, data_b, flags = data_b, data_c, flags_bc
+            suspect = False
+        else:
+            print("[SNAPSHOT] Still suspect after retry — proceeding with scrubbing")
+            flags, suspect = flags_bc, True
+
+    best_data = data_b
+
+    # Scrub flagged sources from the data used for the prompt
+    if suspect:
+        best_data = dict(best_data)
         flagged_text = " ".join(flags).lower()
-        if "liq" in flagged_text and ("🚨" in " ".join(f for f in flags if "liq" in f.lower() or "gate" in f.lower())):
-            scrubbed.pop("liquidations", None)
+        if "liq" in flagged_text and any("🚨" in f for f in flags if "liq" in f.lower() or "gate" in f.lower()):
+            best_data.pop("liquidations", None)
             print("[SNAPSHOT] Liquidation data scrubbed from prompt due to 🚨 flag")
         if "price" in flagged_text and "outside valid range" in flagged_text:
-            scrubbed.pop("binance", None)
+            best_data.pop("binance", None)
             print("[SNAPSHOT] Binance price data scrubbed from prompt due to 🚨 flag")
         if "funding rate" in flagged_text:
             for src in ["derivatives", "bybit", "okx"]:
                 if any(src in f for f in flags if "🚨" in f):
-                    scrubbed.pop(src, None)
+                    best_data.pop(src, None)
                     print(f"[SNAPSHOT] {src} data scrubbed from prompt due to 🚨 funding flag")
 
-    market_text = _fetch_market_data(asset, candles=candles)
+    # Reuse validated data for prompt text — no extra API call
+    market_text = _fetch_market_data(asset, candles=candles, data=best_data)
     flag_header = ""
     if flags:
         icon = "🚨 SUSPECT DATA — some sources scrubbed" if suspect else "⚠️ DATA FLAGS"
@@ -421,21 +442,21 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: s
     instruction = build_snapshot_instruction(horizon, asset)
     prompt = f"{instruction}\n\n{flag_header}{prev_context}{asset.lower()} snapshot\n\n{market_text}"
     snapshot_text = _call_model(TEXT_MODELS, prompt)
-    _store_trade_idea(snapshot_text, data2, asset, horizon)
+    _store_trade_idea(snapshot_text, best_data, asset, horizon)
 
     bias = _extract_bias(snapshot_text)
-    notion_url = log_snapshot_to_notion(snapshot_text, data2, flags, tag, asset)
+    notion_url = log_snapshot_to_notion(snapshot_text, best_data, flags, tag, asset)
 
-    append_to_jsonl(data2, flags, tag, notion_url, bias=bias, asset=asset)
+    append_to_jsonl(best_data, flags, tag, notion_url, bias=bias, asset=asset)
 
     if suspect:
-        open_github_issue(flags, data2, notion_url, tag)
+        open_github_issue(flags, best_data, notion_url, tag)
 
     if notion_url:
         snapshot_text += f"\n\n📓 _Logged to Notion_"
 
     # Write market regime to Redis for consumption by other systems
-    _publish_regime(bias, data2, asset)
+    _publish_regime(bias, best_data, asset)
 
     return snapshot_text, flags
 
