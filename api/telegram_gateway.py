@@ -2,6 +2,7 @@ import telebot
 import telebot.apihelper
 import os
 import sys
+import signal
 import subprocess
 import requests
 import threading
@@ -155,4 +156,27 @@ def handle_message(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
-bot.infinity_polling(timeout=20, long_polling_timeout=15)
+_last_telegram_ok = time.time()
+
+def _watchdog():
+    """Exit if Telegram has been unreachable for 10 minutes, triggering systemd restart."""
+    global _last_telegram_ok
+    while True:
+        time.sleep(120)
+        try:
+            bot.get_me()
+            _last_telegram_ok = time.time()
+        except Exception as e:
+            print(f"[WATCHDOG] get_me failed: {e}")
+        if time.time() - _last_telegram_ok > 600:
+            print("[WATCHDOG] No successful Telegram contact in 10min — forcing restart")
+            os.kill(os.getpid(), signal.SIGTERM)
+
+threading.Thread(target=_watchdog, daemon=True).start()
+
+while True:
+    try:
+        bot.polling(non_stop=False, timeout=20, long_polling_timeout=15)
+    except Exception as e:
+        print(f"[POLLING] Crashed: {e} — retrying in 5s")
+        time.sleep(5)
