@@ -50,24 +50,27 @@ def _get_tv_indicators(candles=None):
     tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
     results = {}
     for label, interval in tfs:
-        h = TA_Handler(symbol="BTCUSDT", screener="crypto", exchange="BINANCE", interval=interval)
-        a = h.get_analysis()
-        bb_upper = a.indicators.get("BB.upper")
-        bb_lower = a.indicators.get("BB.lower")
-        bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
-        results[label] = {
-            "summary": a.summary,
-            "rsi": round(a.indicators["RSI"], 2),
-            "macd": round(a.indicators["MACD.macd"], 4),
-            "macd_signal": round(a.indicators["MACD.signal"], 4),
-            "adx": round(a.indicators["ADX"], 2),
-            "ema_20": round(a.indicators["EMA20"], 2),
-            "ema_50": round(a.indicators["EMA50"], 2),
-            "ema_200": round(a.indicators["EMA200"], 2),
-            "bb_upper": round(bb_upper, 2) if bb_upper else None,
-            "bb_lower": round(bb_lower, 2) if bb_lower else None,
-            "bb_basis": bb_basis,
-        }
+        try:
+            h = TA_Handler(symbol="BTCUSDT", screener="crypto", exchange="BINANCE", interval=interval)
+            a = h.get_analysis()
+            bb_upper = a.indicators.get("BB.upper")
+            bb_lower = a.indicators.get("BB.lower")
+            bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
+            results[label] = {
+                "summary": a.summary,
+                "rsi": round(a.indicators["RSI"], 2),
+                "macd": round(a.indicators["MACD.macd"], 4),
+                "macd_signal": round(a.indicators["MACD.signal"], 4),
+                "adx": round(a.indicators["ADX"], 2),
+                "ema_20": round(a.indicators["EMA20"], 2),
+                "ema_50": round(a.indicators["EMA50"], 2),
+                "ema_200": round(a.indicators["EMA200"], 2),
+                "bb_upper": round(bb_upper, 2) if bb_upper else None,
+                "bb_lower": round(bb_lower, 2) if bb_lower else None,
+                "bb_basis": bb_basis,
+            }
+        except Exception as e:
+            print(f"[TA] {label} fetch failed, skipping: {e}")
     return results
 
 
@@ -423,24 +426,27 @@ def get_asset_analysis(symbol: str, candles=None) -> dict:
         ta_results = {}
         tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
         for label, interval in tfs:
-            h = TA_Handler(symbol=pair, screener="crypto", exchange="BINANCE", interval=interval)
-            a = h.get_analysis()
-            bb_upper = a.indicators.get("BB.upper")
-            bb_lower = a.indicators.get("BB.lower")
-            bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
-            ta_results[label] = {
-                "summary": a.summary,
-                "rsi": round(a.indicators["RSI"], 2),
-                "macd": round(a.indicators["MACD.macd"], 4),
-                "macd_signal": round(a.indicators["MACD.signal"], 4),
-                "adx": round(a.indicators["ADX"], 2),
-                "ema_20": round(a.indicators["EMA20"], 2),
-                "ema_50": round(a.indicators["EMA50"], 2),
-                "ema_200": round(a.indicators["EMA200"], 2),
-                "bb_upper": round(bb_upper, 2) if bb_upper else None,
-                "bb_lower": round(bb_lower, 2) if bb_lower else None,
-                "bb_basis": bb_basis,
-            }
+            try:
+                h = TA_Handler(symbol=pair, screener="crypto", exchange="BINANCE", interval=interval)
+                a = h.get_analysis()
+                bb_upper = a.indicators.get("BB.upper")
+                bb_lower = a.indicators.get("BB.lower")
+                bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
+                ta_results[label] = {
+                    "summary": a.summary,
+                    "rsi": round(a.indicators["RSI"], 2),
+                    "macd": round(a.indicators["MACD.macd"], 4),
+                    "macd_signal": round(a.indicators["MACD.signal"], 4),
+                    "adx": round(a.indicators["ADX"], 2),
+                    "ema_20": round(a.indicators["EMA20"], 2),
+                    "ema_50": round(a.indicators["EMA50"], 2),
+                    "ema_200": round(a.indicators["EMA200"], 2),
+                    "bb_upper": round(bb_upper, 2) if bb_upper else None,
+                    "bb_lower": round(bb_lower, 2) if bb_lower else None,
+                    "bb_basis": bb_basis,
+                }
+            except Exception as e:
+                print(f"[TA] {label} fetch failed for {pair}, skipping: {e}")
         result["ta"] = ta_results
     except Exception as e:
         result["ta_error"] = str(e)
