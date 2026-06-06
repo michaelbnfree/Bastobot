@@ -420,7 +420,12 @@ def _call_model(models, content):
         raise RuntimeError(data.get('error', {}).get('message', str(data)))
     return data['choices'][0]['message']['content']
 
-_SNAPSHOT_KEYWORDS = ("snapshot", "market overview", "market update", "market check")
+_SNAPSHOT_KEYWORDS = (
+    "snapshot", "market overview", "market update", "market check",
+    "scalp", "day trade", "daytrade", "intraday",
+    "swing trade", "swing setup",
+    "position trade", "trade idea", "trade setup",
+)
 
 def _is_snapshot_request(prompt: str) -> bool:
     if not prompt:
