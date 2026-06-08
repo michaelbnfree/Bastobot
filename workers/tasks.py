@@ -163,6 +163,7 @@ def build_snapshot_instruction(horizon: str, asset: str = "BTC") -> str:
     trend_lines = "\n".join(f"- {c}: [brief read]" for c in candles)
     return f"""You are a sharp, no-fluff crypto derivatives analyst. Use all live market data provided.
 Data covers the last {lookback}. Focus analysis on the {'/'.join(c.upper() for c in candles)} timeframes.
+CRITICAL: The PRIMARY SETUP section label MUST be exactly "{meta['label']}" — do not substitute any other trade type label.
 
 Respond in exactly this format (no extra sections, no disclaimers):
 
