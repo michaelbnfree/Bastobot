@@ -35,7 +35,7 @@ async def handle_query(req: Request):
         'workers.tasks.process_task', msg, cat,
         image_b64=image_b64, mime_type=mime_type,
         job_timeout=600,
-        result_ttl=500,
+        result_ttl=3600,
     )
     return {"category": cat, "job_id": job.id, "status": "queued"}
 
