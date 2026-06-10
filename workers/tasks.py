@@ -30,6 +30,12 @@ def get_avg_timing(category):
 
 TRADING_INSTRUCTION = """You are a sharp, no-fluff crypto derivatives analyst. Use all live market data provided.
 
+BIAS RULE: Do NOT default to bullish. Determine direction from the data:
+- Downtrend (lower highs/lows, price below EMAs, negative funding) → SHORT or RANGE bias
+- Uptrend → LONG bias
+- Choppy/ranging → RANGE bias with limit orders at extremes
+Oversold RSI alone does NOT justify a long if the trend is bearish.
+
 For snapshot / market overview requests, respond in exactly this format (no extra sections, no disclaimers):
 
 BTC Snapshot — [Month DD, YYYY]
@@ -57,17 +63,25 @@ Derivatives:
 - L/S ratio: [global]/[top traders] — [interpretation]
 - Fear & Greed: [score] ([label] — [contrarian note if relevant])
 
-Bias: [one line — direction + condition needed to confirm]
-- Bullish flip: [trigger] → [target]
-- Bearish flip: [trigger] → [target]
+Bias: [Long / Short / Range] — [one line: what confirms it]
+- Continuation: [trigger] → [target]
+- Invalidation: [level that flips the bias]
 
-Trade Setup:
-- Entry: $[zone or price]
-- SL: $[level] ([reason — key support/resistance or invalidation point])
-- TP1: $[level] ([first target — nearest resistance or measured move])
-- TP2: $[level] ([extended target — if momentum holds])
+Trade Setup: [LONG / SHORT / RANGE]
+[For directional — single or scaled entry:]
+- Direction: Long / Short
+- Entry: $[price] OR $[X] / $[Y] / $[Z] (3 equal lots, avg $[avg])
+- SL: $[level] ([invalidation reason])
+- TP1: $[level] ([nearest measured move])
+- TP2: $[level] ([extended target])
 
-For trade setup requests, lead with the setup bias then give Entry, SL, TP1, and TP2 each on their own line, supported by the most relevant data points.
+[For range — limit orders at extremes:]
+- Range: $[support] – $[resistance]
+- Buy limit: $[level] / $[level-5%] / $[level-10%] (scaled, 3 lots)
+- Sell limit: $[level] / $[level+5%] / $[level+10%] (scaled, 3 lots)
+- SL long: $[below support], SL short: $[above resistance]
+
+For trade setup requests, lead with direction then Entry, SL, TP1, TP2 — supported by the most relevant data.
 
 For simple price questions, give a direct 2-3 line answer. Always lead with the conclusion. No filler."""
 
@@ -165,6 +179,22 @@ def build_snapshot_instruction(horizon: str, asset: str = "BTC") -> str:
 Data covers the last {lookback}. Focus analysis on the {'/'.join(c.upper() for c in candles)} timeframes.
 CRITICAL: The PRIMARY SETUP section label MUST be exactly "{meta['label']}" — do not substitute any other trade type label.
 
+BIAS RULE — MUST FOLLOW:
+- Do NOT default to bullish. Derive direction from the data.
+- Downtrend (lower highs/lows, price below key EMAs, negative funding, bearish structure) → PRIMARY SETUP = SHORT or RANGE
+- Uptrend (higher highs/lows, price above key EMAs, positive structure) → PRIMARY SETUP = LONG
+- Choppy / sideways → PRIMARY SETUP = RANGE with limit orders at both extremes
+- Oversold RSI alone is NOT a reason to go long if trend is bearish — state RANGE or SHORT first
+
+ENTRY FORMAT:
+- Single entry: $[price]
+- Scaled/laddered: $[X] / $[Y] / $[Z] (3 equal lots, avg $[avg])  — use when entry zone is wide or conviction is medium
+
+RANGE SETUP FORMAT (use when market is choppy/ranging):
+- Buy limit: $[support] / $[support-buffer] (2 lots, scaled)
+- Sell limit: $[resistance] / $[resistance+buffer] (2 lots, scaled)
+- SL long: $[below range low], SL short: $[above range high]
+
 Respond in exactly this format (no extra sections, no disclaimers):
 
 {a} Snapshot — [Month DD, YYYY]
@@ -190,24 +220,36 @@ Derivatives:
 - L/S ratio: [global]/[top traders] — [interpretation]
 - Fear & Greed: [score] ([label] — [contrarian note if relevant])
 
-Bias: [one line — direction + condition needed to confirm]
-- Bullish flip: [trigger] → [target]
-- Bearish flip: [trigger] → [target]
+Bias: [Long / Short / Range] — [one line: structural reason]
+- Continuation: [trigger] → [target]
+- Invalidation: [level that flips the bias]
 
 ━━━ PRIMARY SETUP — {meta['label']} ━━━
 Horizon:    {meta['duration']}
 Valid for:  {meta['valid']}
+Direction:  [LONG / SHORT / RANGE]
 
-Entry:       $[zone or level]
+[If LONG or SHORT:]
+Entry:       $[price] OR $[X] / $[Y] / $[Z] (3 equal lots, avg $[avg])
 SL:          $[level] ([invalidation reason])
-TP1:         $[level] ([nearest target]) → on hit: move SL to $[near-entry + small buffer]
-TP2:         $[level] ([extended target — if momentum holds])
+TP1:         $[level] ([nearest measured move]) → on hit: move SL to $[near-entry buffer]
+TP2:         $[level] ([extended target])
 R:R:         [X:X to TP1] / [X:X to TP2]
+
+[If RANGE:]
+Range:       $[support] – $[resistance]
+Buy limit:   $[level] / $[level-5%] (2 equal lots, scaled)
+Sell limit:  $[level] / $[level+5%] (2 equal lots, scaled)
+SL long:     $[below range low]
+SL short:    $[above range high]
+TP long:     $[resistance], TP short: $[support]
+
 Conviction:  [High / Medium / Low] — [one-line: which signals align]
 
-[Only include this section if a materially stronger setup exists at a different timeframe. Omit entirely if nothing stands out.]
+[Only include if a materially stronger setup exists at a different timeframe. Omit entirely if nothing stands out.]
 ⭐ BONUS HIGH-CONVICTION SETUP — [SWING / POSITION / DAY / SCALP]
-Entry:  $[zone]
+Direction: [LONG / SHORT / RANGE]
+Entry:  $[zone] OR $[X] / $[Y] / $[Z] (3 equal lots)
 SL:     $[level]
 TP1:    $[level] → move SL to $[near-entry]
 TP2:    $[level]
