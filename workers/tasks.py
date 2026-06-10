@@ -220,6 +220,15 @@ For simple price questions, give a direct 2-3 line answer. Always lead with the 
 def _fetch_market_data(asset="BTC", candles=None, data=None):
     try:
         if data is None:
+            # Use scanner cache when available (< 10 min old) to avoid redundant API calls
+            try:
+                from skills.scanner import get_cached
+                data = get_cached(asset)
+                if data is not None:
+                    print(f"[CACHE] Using cached data for {asset}")
+            except Exception:
+                pass
+        if data is None:
             from skills.trading import get_btc_analysis, get_asset_analysis
             if asset == "BTC":
                 data = get_btc_analysis(candles=candles)
@@ -435,9 +444,132 @@ def _is_snapshot_request(prompt: str) -> bool:
     return any(kw in p for kw in _SNAPSHOT_KEYWORDS)
 
 
+import re as _re
+
+def _handle_scanner_command(prompt: str) -> str | None:
+    """
+    Intercepts scanner/watchlist/trade commands before the LLM pipeline.
+    Returns a response string if matched, None to fall through to normal processing.
+    """
+    if not prompt:
+        return None
+    p = prompt.strip()
+    pl = p.lower()
+
+    # ── Watchlist ─────────────────────────────────────────────────────────────
+    # "watch SOL" or "watch SOL - solana L1 narrative"
+    m = _re.match(r'^watch\s+([A-Za-z0-9]+)(?:\s*[-:]\s*(.+))?$', p, _re.IGNORECASE)
+    if m:
+        from skills.watchlist import add_user
+        ok, msg = add_user(m.group(1), (m.group(2) or "").strip())
+        return msg
+
+    m = _re.match(r'^(unwatch|remove from watchlist|remove)\s+([A-Za-z0-9]+)$', pl)
+    if m:
+        from skills.watchlist import remove_user
+        ok, msg = remove_user(m.group(2).upper())
+        return msg
+
+    if pl in ("watchlist", "my watchlist", "show watchlist", "wl"):
+        from skills.watchlist import format_watchlist
+        return format_watchlist()
+
+    # ── Hot trades ────────────────────────────────────────────────────────────
+    if any(pl.startswith(kw) for kw in ("hot trades", "top trades", "top setups", "hot setups", "best setups")):
+        from skills.hot_trades import format_hot_trades
+        return format_hot_trades()
+
+    # ── Open trades ───────────────────────────────────────────────────────────
+    if pl in ("my trades", "open trades", "trades", "show trades", "positions"):
+        from skills.trade_monitor import format_open_trades
+        return format_open_trades()
+
+    # "close trade ETH" / "close ETH trade" / "close ETH"
+    m = _re.match(r'^close(?:\s+trade)?\s+([A-Za-z0-9]+)$', pl)
+    if not m:
+        m = _re.match(r'^close\s+([A-Za-z0-9]+)\s+trade$', pl)
+    if m:
+        from skills.trade_monitor import close_trade
+        ok, msg = close_trade(m.group(1).upper())
+        return msg
+
+    # ── Conviction score ──────────────────────────────────────────────────────
+    m = _re.match(r'^(conviction|score|cv|signals)\s+([A-Za-z0-9]+)$', pl)
+    if m:
+        sym = m.group(2).upper()
+        from skills.scanner import get_or_fetch
+        from skills.conviction import score as conv_score, format_conviction
+        data = get_or_fetch(sym)
+        if not data:
+            return f"Could not fetch data for {sym}."
+        cv = conv_score(data, sym)
+        return format_conviction(cv, sym)
+
+    # ── Manual scan ───────────────────────────────────────────────────────────
+    if pl in ("scan", "scan now", "run scan", "rescan"):
+        from scripts.scanner_service import run_scan
+        run_scan()
+        from skills.hot_trades import format_hot_trades
+        return "Scan complete.\n\n" + format_hot_trades()
+
+    # ── Trade entry ───────────────────────────────────────────────────────────
+    # "trade ETH long 3200 sl 3100 tp1 3400 tp2 3600 swing"
+    # "monitor BTC short 95000 sl 96500 tp1 91000 day"
+    m = _re.match(
+        r'^(?:trade|monitor|enter trade|enter)\s+'
+        r'([A-Za-z0-9]+)\s+'
+        r'(long|short)\s+'
+        r'([\d,]+(?:\.\d+)?)\s+'
+        r'sl\s+([\d,]+(?:\.\d+)?)\s+'
+        r'tp1?\s+([\d,]+(?:\.\d+)?)'
+        r'(?:\s+tp2\s+([\d,]+(?:\.\d+)?))?'
+        r'(?:\s+(scalp|day|swing|position))?',
+        pl, _re.IGNORECASE
+    )
+    if m:
+        from skills.trade_monitor import enter_trade
+        sym       = m.group(1).upper()
+        direction = m.group(2).capitalize()
+        entry     = float(m.group(3).replace(",", ""))
+        sl        = float(m.group(4).replace(",", ""))
+        tp1       = float(m.group(5).replace(",", ""))
+        tp2       = float(m.group(6).replace(",", "")) if m.group(6) else None
+        horizon   = (m.group(7) or "swing").lower()
+        # Grab conviction label from cache if available
+        conviction_label = None
+        try:
+            from skills.conviction import get_cached as conv_cached
+            cv = conv_cached(sym)
+            if cv:
+                conviction_label = cv["label"]
+        except Exception:
+            pass
+        trade = enter_trade(sym, direction, entry, sl, tp1, tp2, horizon, conviction=conviction_label)
+        notion_note = f"\n📓 Logged: {trade['notion_url']}" if trade.get("notion_url") else ""
+        tp2_str = f"  TP2: ${tp2:,.2f}" if tp2 else ""
+        return (
+            f"✅ *Trade entered: {sym} {direction}*\n"
+            f"Entry: ${entry:,.2f}  SL: ${sl:,.2f}\n"
+            f"TP1: ${tp1:,.2f}{tp2_str}\n"
+            f"Horizon: {horizon.capitalize()}"
+            f"{notion_note}"
+        )
+
+    return None
+
+
 def process_task(prompt, category=None, *args, image_b64=None, mime_type="image/jpeg", **kwargs):
     print(f"--- Processing [{category}]: {prompt[:60] if prompt else '[image only]'} ---")
     start = time.time()
+
+    # Scanner/watchlist/trade commands intercept before LLM pipeline
+    if not image_b64:
+        try:
+            cmd_response = _handle_scanner_command(prompt)
+            if cmd_response is not None:
+                return cmd_response
+        except Exception as e:
+            print(f"[CMD] Handler error: {e}")
 
     # Verified snapshot flow: two API calls 60s apart + Notion log
     if category == "financial" and not image_b64 and _is_snapshot_request(prompt):
