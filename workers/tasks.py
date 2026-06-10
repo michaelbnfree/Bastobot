@@ -79,11 +79,13 @@ Trade Setup: [LONG / SHORT / RANGE]
 - TP1: $[level] ([nearest measured move])
 - TP2: $[level] ([extended target])
 
-[For range — limit orders at extremes:]
+[For range — limit orders stacked TIGHTLY at each extreme:]
 - Range: $[support] – $[resistance]
-- Buy limit: $[level] / $[level-5%] / $[level-10%] (scaled, 3 lots)
-- Sell limit: $[level] / $[level+5%] / $[level+10%] (scaled, 3 lots)
-- SL long: $[below support], SL short: $[above resistance]
+- Buy limit: $[support] / $[support - 0.3%] / $[support - 0.6%] (3 equal lots, avg ~$[avg], clustered at support)
+- Sell limit: $[resistance] / $[resistance + 0.3%] / $[resistance + 0.6%] (3 equal lots, avg ~$[avg], clustered at resistance)
+- SL long: $[below support - 1%], SL short: $[above resistance + 1%]
+- TP long: $[near resistance], TP short: $[near support]
+NOTE: Entries must be stacked within ~0.5–1% of the key level, NOT spread across the full range width.
 
 For trade setup requests, lead with direction then Entry, SL, TP1, TP2 — supported by the most relevant data.
 
@@ -202,9 +204,11 @@ ENTRY FORMAT:
 - Scaled/laddered: $[X] / $[Y] / $[Z] (3 equal lots, avg $[avg])  — use when entry zone is wide or conviction is medium
 
 RANGE SETUP FORMAT (use when market is choppy/ranging):
-- Buy limit: $[support] / $[support-buffer] (2 lots, scaled)
-- Sell limit: $[resistance] / $[resistance+buffer] (2 lots, scaled)
-- SL long: $[below range low], SL short: $[above range high]
+Entries stack TIGHTLY at the key level — within 0.5–1% of the level, NOT spread across the full range.
+- Buy limit: $[support] / $[support - 0.3%] / $[support - 0.6%] (3 equal lots, avg clustered at support)
+- Sell limit: $[resistance] / $[resistance + 0.3%] / $[resistance + 0.6%] (3 equal lots, avg clustered at resistance)
+- SL long: $[below support - 1%], SL short: $[above resistance + 1%]
+- TP long: $[near resistance], TP short: $[near support]
 
 Respond in exactly this format (no extra sections, no disclaimers):
 
@@ -247,13 +251,13 @@ TP1:         $[level] ([nearest measured move]) → on hit: move SL to $[near-en
 TP2:         $[level] ([extended target])
 R:R:         [X:X to TP1] / [X:X to TP2]
 
-[If RANGE:]
+[If RANGE — stack entries tightly AT the key level, NOT spread across the range:]
 Range:       $[support] – $[resistance]
-Buy limit:   $[level] / $[level-5%] (2 equal lots, scaled)
-Sell limit:  $[level] / $[level+5%] (2 equal lots, scaled)
-SL long:     $[below range low]
-SL short:    $[above range high]
-TP long:     $[resistance], TP short: $[support]
+Buy limit:   $[support] / $[support - 0.3%] / $[support - 0.6%] (3 equal lots, avg clustered at support)
+Sell limit:  $[resistance] / $[resistance + 0.3%] / $[resistance + 0.6%] (3 equal lots, avg clustered at resistance)
+SL long:     $[below support - 1%]
+SL short:    $[above resistance + 1%]
+TP long:     $[near resistance], TP short: $[near support]
 
 Conviction:  [High / Medium / Low] — [one-line: which signals align]
 
