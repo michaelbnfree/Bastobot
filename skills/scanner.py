@@ -6,6 +6,7 @@ and fires Telegram alerts when alert conditions are met with cooldowns.
 
 import sys
 import json
+import time
 import requests
 import redis as _redis_lib
 from datetime import datetime, timezone
@@ -15,7 +16,8 @@ sys.path.insert(0, "/root/bastobot")
 _r = _redis_lib.Redis(host="localhost", port=6379, db=0)
 
 _CACHE_KEY = "scanner:cache:{symbol}"
-_CACHE_TTL = 600   # 10 min — fresh enough for alerts, fast for on-demand snapshots
+_CACHE_TTL = 900   # 15 min — TV rate limit: only refresh every 3rd 5-min cycle
+_FETCH_SLEEP = 8   # seconds between asset fetches to avoid TV 429s
 _ALERT_KEY = "scanner:alert:{symbol}:{condition}"
 _PREV_PRICE_KEY = "scanner:prev_price:{symbol}"
 
@@ -65,6 +67,21 @@ def get_cached(symbol: str) -> dict | None:
     if not raw:
         return None
     return json.loads(raw).get("data")
+
+
+def cache_age_seconds(symbol: str) -> float | None:
+    """Returns how old the cache entry is in seconds, or None if no cache."""
+    raw = _r.get(_CACHE_KEY.format(symbol=symbol))
+    if not raw:
+        return None
+    fetched = json.loads(raw).get("fetched")
+    if not fetched:
+        return None
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(fetched)).total_seconds()
+        return age
+    except Exception:
+        return None
 
 
 def get_or_fetch(symbol: str, candles: tuple = ("1h", "4h", "1d")) -> dict | None:
@@ -222,14 +239,46 @@ def check_alerts(symbol: str, data: dict) -> list[str]:
 
 
 def scan_all() -> dict[str, dict]:
-    """Fetch + cache + alert for all watched symbols. Returns {symbol: data}."""
+    """
+    Fetch + cache + alert for all watched symbols. Returns {symbol: data}.
+    Uses cached data when < _CACHE_TTL old; only hits TradingView on cache miss,
+    with a sleep between fetches to avoid 429s.
+    """
     from skills.watchlist import get_all_symbols
     results: dict[str, dict] = {}
+    needs_fetch: list[str] = []
+    cached_hits: list[str] = []
+
     for symbol in get_all_symbols():
+        age = cache_age_seconds(symbol)
+        if age is not None and age < _CACHE_TTL:
+            cached_hits.append(symbol)
+        else:
+            needs_fetch.append(symbol)
+
+    if cached_hits:
+        print(f"[SCANNER] Using cache for: {', '.join(cached_hits)}")
+    if needs_fetch:
+        print(f"[SCANNER] Fetching fresh data for: {', '.join(needs_fetch)}")
+
+    # Use cached data (no TV call)
+    for symbol in cached_hits:
+        data = get_cached(symbol)
+        if data:
+            results[symbol] = data
+
+    # Fetch stale/missing assets one at a time with spacing
+    for i, symbol in enumerate(needs_fetch):
+        if i > 0:
+            time.sleep(_FETCH_SLEEP)
         data = fetch_and_cache(symbol)
         if data:
             results[symbol] = data
-            alerts = check_alerts(symbol, data)
-            if alerts:
-                print(f"[SCANNER] {symbol}: fired {alerts}")
+
+    # Run alert checks on all results
+    for symbol, data in results.items():
+        alerts = check_alerts(symbol, data)
+        if alerts:
+            print(f"[SCANNER] {symbol}: fired {alerts}")
+
     return results
