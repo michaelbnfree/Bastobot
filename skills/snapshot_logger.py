@@ -16,9 +16,10 @@ from dotenv import load_dotenv
 
 load_dotenv('/root/bastobot/.env')
 
-NOTION_API_KEY   = os.getenv("NOTION_API_KEY")
-NOTION_VERSION   = "2022-06-28"
-SNAPSHOT_DB_ID   = "36970a02-6811-819d-8132-dc53402347cb"
+NOTION_API_KEY        = os.getenv("NOTION_API_KEY")
+NOTION_VERSION        = "2022-06-28"
+SNAPSHOT_DB_ID        = "36970a02-6811-819d-8132-dc53402347cb"
+CHAIN_SNAPSHOTS_DB_ID = os.getenv("NOTION_CHAIN_SNAPSHOTS_DB_ID", "")
 GITHUB_TOKEN     = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO      = "michaelbnfree/Bastobot"
 JSONL_PATH       = "/root/bastobot/data/snapshots.jsonl"
@@ -169,6 +170,12 @@ def log_snapshot_to_notion(snapshot_text: str, data: dict, flags: list[str], tag
     if not NOTION_API_KEY:
         return None
 
+    # Non-BTC assets route to Chain Snapshots DB when configured
+    is_alt = asset != "BTC"
+    db_id  = CHAIN_SNAPSHOTS_DB_ID if (is_alt and CHAIN_SNAPSHOTS_DB_ID) else SNAPSHOT_DB_ID
+    if not db_id:
+        return None
+
     now = datetime.now(timezone.utc)
     title = f"{asset} Snapshot — {now.strftime('%b %d, %Y %H:%M')} UTC"
     binance = data.get("binance", {})
@@ -184,6 +191,18 @@ def log_snapshot_to_notion(snapshot_text: str, data: dict, flags: list[str], tag
         "Flag Count":  {"number": len(flags)},
         "Suspect":     {"checkbox": any("🚨" in f for f in flags)},
     }
+
+    # Chain taxonomy properties for alt coins
+    if is_alt:
+        try:
+            from skills.chain_map import get_chain, ecosystem_label
+            chain = get_chain(asset)
+            eco   = ecosystem_label(asset)
+            if chain:
+                properties["Chain"]     = {"select": {"name": chain}}
+                properties["Ecosystem"] = {"select": {"name": eco}}
+        except Exception:
+            pass
     if binance.get("price"):
         properties["Price"] = {"number": binance["price"]}
     if binance.get("change_24h_pct") is not None:
@@ -218,7 +237,7 @@ def log_snapshot_to_notion(snapshot_text: str, data: dict, flags: list[str], tag
         r = requests.post(
             "https://api.notion.com/v1/pages",
             headers=HEADERS,
-            json={"parent": {"database_id": SNAPSHOT_DB_ID}, "properties": properties, "children": children},
+            json={"parent": {"database_id": db_id}, "properties": properties, "children": children},
             timeout=15,
         )
         r.raise_for_status()

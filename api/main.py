@@ -17,6 +17,9 @@ FINANCIAL_KEYWORDS = [
     'usdt', 'usd', 'leverage', 'liquidat', 'position', 'entry', 'target', 'stop',
     'limit', 'order', 'buy', 'sell', 'signal', 'trend', 'pump', 'dump',
     'wick', 'level', 'setup', 'tp', 'sl', 'pnl', 'profit', 'loss',
+    # Scanner / watchlist / trade monitor commands
+    'watch', 'unwatch', 'watchlist', 'hot trades', 'top trades', 'top setups',
+    'my trades', 'open trades', 'conviction', 'monitor', 'scan',
 ]
 
 def classify(msg: str) -> str:
