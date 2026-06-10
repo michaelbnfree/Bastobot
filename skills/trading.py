@@ -49,7 +49,9 @@ def _get_binance_price():
 def _get_tv_indicators(candles=None):
     tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
     results = {}
-    for label, interval in tfs:
+    for i, (label, interval) in enumerate(tfs):
+        if i > 0:
+            time.sleep(2)
         try:
             h = TA_Handler(symbol="BTCUSDT", screener="crypto", exchange="BINANCE", interval=interval)
             a = h.get_analysis()
@@ -425,7 +427,9 @@ def get_asset_analysis(symbol: str, candles=None) -> dict:
     try:
         ta_results = {}
         tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
-        for label, interval in tfs:
+        for i, (label, interval) in enumerate(tfs):
+            if i > 0:
+                time.sleep(2)
             try:
                 h = TA_Handler(symbol=pair, screener="crypto", exchange="BINANCE", interval=interval)
                 a = h.get_analysis()
