@@ -458,7 +458,13 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: s
         except Exception:
             pass
 
-    instruction = build_snapshot_instruction(horizon, asset)
+    try:
+        from skills.trade_monitor import get_open_trade
+        open_trade = get_open_trade(asset)
+    except Exception:
+        open_trade = None
+
+    instruction = build_snapshot_instruction(horizon, asset, open_trade=open_trade)
     prompt = f"{instruction}\n\n{flag_header}{prev_context}{asset.lower()} snapshot\n\n{market_text}"
     snapshot_text = _call_model(TEXT_MODELS, prompt)
     _store_trade_idea(snapshot_text, best_data, asset, horizon)

@@ -175,16 +175,38 @@ _HORIZON_META = {
     },
 }
 
-def build_snapshot_instruction(horizon: str, asset: str = "BTC") -> str:
+def build_snapshot_instruction(horizon: str, asset: str = "BTC", open_trade: dict | None = None) -> str:
     meta = _HORIZON_META.get(horizon, _HORIZON_META[_HORIZON_SWING])
     a = asset
     candles = meta["candles"]
     lookback = meta["lookback"]
     trend_lines = "\n".join(f"- {c}: [brief read]" for c in candles)
+
+    if open_trade:
+        t = open_trade
+        tp2_line = f"\n  TP2:       ${t['tp2']:,.2f}" if t.get("tp2") else ""
+        trade_context = (
+            f"\nOPEN TRADE (real, tracked by the system — reference this in Prior Trade Update):\n"
+            f"  Symbol:    {t['symbol']}\n"
+            f"  Direction: {t['direction']}\n"
+            f"  Horizon:   {t['horizon'].capitalize()}\n"
+            f"  Entry:     ${t['entry']:,.2f}\n"
+            f"  SL:        ${t['sl']:,.2f}\n"
+            f"  TP1:       ${t['tp1']:,.2f}{tp2_line}\n"
+            f"  Entered:   {t['entered_at'][:10]}\n\n"
+            f"Include a '--- Prior Trade Update ---' section at the end: is the trade still valid? "
+            f"Has price moved toward TP or SL? Should the SL be trailed? State clearly: Hold / Adjust SL / Close.\n"
+        )
+    else:
+        trade_context = (
+            "\nNo open trades for this asset. "
+            "Do NOT include a 'Prior Trade Update' section — you have no memory of previous setups.\n"
+        )
+
     return f"""You are a sharp, no-fluff crypto derivatives analyst. Use all live market data provided.
 Data covers the last {lookback}. Focus analysis on the {'/'.join(c.upper() for c in candles)} timeframes.
 CRITICAL: The PRIMARY SETUP section label MUST be exactly "{meta['label']}" — do not substitute any other trade type label.
-
+{trade_context}
 BIAS RULE — MUST FOLLOW:
 - Do NOT default to bullish. Derive direction from the data.
 - Downtrend (lower highs/lows, price below key EMAs, negative funding, bearish structure) → PRIMARY SETUP = SHORT or RANGE

@@ -164,6 +164,14 @@ def get_all_open() -> list[dict]:
     return get_all_trades("Open")
 
 
+def get_open_trade(symbol: str) -> dict | None:
+    """Return the first open trade for this symbol, or None."""
+    for t in get_all_open():
+        if t["symbol"] == symbol.upper():
+            return t
+    return None
+
+
 def check_trades(price_map: dict[str, float]) -> None:
     """Called by scanner loop. Checks every open trade against current prices."""
     for trade in get_all_open():
