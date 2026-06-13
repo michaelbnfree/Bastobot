@@ -171,6 +171,7 @@ def run_scan() -> None:
         print(f"[SCANNER] auto watchlist update failed: {e}")
 
     print(f"[SCANNER] Done — {len(results)} assets")
+    _r.set("scanner:last_scan", datetime.now(timezone.utc).isoformat())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
