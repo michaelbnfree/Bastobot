@@ -1,6 +1,8 @@
 #!/bin/bash
-# Sends a Telegram alert when Barry restarts unexpectedly.
-# Skipped if barry:restart:intentional is set in Redis (manual restart).
+# Sends a Telegram alert when Barry restarts.
+# - Intentional (manual) restarts: silent.
+# - Kernel upgrade reboots: informational (✅).
+# - Unexpected crashes: warning (⚠️).
 
 TOKEN="8282849330:AAEAnJpa0lcp7FoFlnHUCcwyPoXJ7uh3I-U"
 CHAT_ID="298886049"
@@ -11,8 +13,16 @@ if [ "$INTENTIONAL" = "1" ]; then
     exit 0
 fi
 
+KERNEL_NOW=$(uname -r)
+KERNEL_LAST=$(redis-cli get barry:last_kernel 2>/dev/null)
 TIMESTAMP=$(date -u '+%b %d, %Y %H:%M UTC')
-MESSAGE="⚠️ Barry restarted at ${TIMESTAMP} — if unexpected, check for missed messages. (VPS snapshot or crash)"
+
+if [ -n "$KERNEL_LAST" ] && [ "$KERNEL_NOW" != "$KERNEL_LAST" ]; then
+    MESSAGE="✅ Barry back online at ${TIMESTAMP} — kernel upgraded (${KERNEL_LAST} → ${KERNEL_NOW})"
+    redis-cli del barry:last_kernel > /dev/null 2>&1
+else
+    MESSAGE="⚠️ Barry restarted at ${TIMESTAMP} — if unexpected, check for missed messages. (VPS snapshot or crash)"
+fi
 
 curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
     --data-urlencode "chat_id=${CHAT_ID}" \
