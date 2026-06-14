@@ -634,6 +634,90 @@ def _handle_scanner_command(prompt: str) -> str | None:
             f"{notion_note}"
         )
 
+    # ── Hyperliquid ───────────────────────────────────────────────────────────
+    # "hl balance" / "hl account"
+    if pl in ("hl balance", "hl account", "hl summary"):
+        from skills.active.hyperliquid import get_account_summary, get_positions
+        acct = get_account_summary()
+        pos  = get_positions()
+        lines = [
+            f"*Hyperliquid Account*",
+            f"Equity: ${acct['account_value']:,.2f}  Margin used: ${acct['total_margin_used']:,.2f}  Withdrawable: ${acct['withdrawable']:,.2f}",
+        ]
+        if pos:
+            lines.append("\n*Open Positions*")
+            for p in pos:
+                pnl = f"{p['unrealized_pnl']:+.4f}"
+                lines.append(
+                    f"  {p['coin']} {p['side'].upper()}  {p['size']} @ ${p['entry_price']:,}  "
+                    f"Mark ${p['mark_price']:,}  PnL ${pnl}  Liq ${p['liquidation_price'] or 'N/A'}"
+                )
+        else:
+            lines.append("No open positions.")
+        return "\n".join(lines)
+
+    # "hl orders"
+    if pl in ("hl orders", "hl open orders"):
+        from skills.active.hyperliquid import get_open_orders
+        orders = get_open_orders()
+        if not orders:
+            return "No open HL orders."
+        lines = ["*Open HL Orders*"]
+        for o in orders:
+            lines.append(
+                f"  {o['coin']} {o['side'].upper()}  sz {o['size']}  @ ${o['limit_px']:,}  oid {o['oid']}"
+            )
+        return "\n".join(lines)
+
+    # "hl long BTC 20" / "hl short ETH 50"
+    m = _re.match(r'^hl\s+(long|short)\s+([A-Za-z0-9]+)\s+([\d.]+)$', pl)
+    if m:
+        from skills.active.hyperliquid import place_market_order
+        side   = m.group(1).lower()
+        coin   = m.group(2).upper()
+        sz_usd = float(m.group(3))
+        result = place_market_order(coin, is_buy=(side == "long"), sz_usd=sz_usd)
+        if result["status"] == "ok":
+            return (
+                f"✅ *HL {side.upper()} {coin}*\n"
+                f"Filled {result['size']} {coin} @ ${result['filled_px']:,}\n"
+                f"Notional ~${sz_usd:.0f}"
+            )
+        return f"❌ HL order failed: {result['error']}"
+
+    # "hl close BTC" / "hl close all"
+    m = _re.match(r'^hl\s+close\s+([A-Za-z0-9]+)$', pl)
+    if m:
+        from skills.active.hyperliquid import close_position, get_positions
+        coin = m.group(1).upper()
+        if coin == "ALL":
+            pos = get_positions()
+            if not pos:
+                return "No open HL positions to close."
+            lines = []
+            for p in pos:
+                r = close_position(p["coin"])
+                if r["status"] == "ok":
+                    lines.append(f"✅ Closed {p['coin']} @ ${r.get('filled_px', '?'):,}")
+                else:
+                    lines.append(f"❌ {p['coin']} close failed: {r['error']}")
+            return "\n".join(lines)
+        result = close_position(coin)
+        if result["status"] == "ok":
+            return f"✅ *Closed {coin}* @ ${result.get('filled_px', '?'):,}"
+        return f"❌ HL close failed: {result['error']}"
+
+    # "hl cancel BTC 468590673660"
+    m = _re.match(r'^hl\s+cancel\s+([A-Za-z0-9]+)\s+(\d+)$', pl)
+    if m:
+        from skills.active.hyperliquid import cancel_order
+        coin = m.group(1).upper()
+        oid  = int(m.group(2))
+        result = cancel_order(coin, oid)
+        if result["status"] == "ok":
+            return f"✅ Cancelled {coin} order {oid}"
+        return f"❌ Cancel failed: {result['error']}"
+
     return None
 
 
