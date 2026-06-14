@@ -51,13 +51,21 @@ def _main_addr() -> str:
     return os.getenv("HL_MAIN_ADDRESS", "")
 
 
+def _sz_decimals(coin: str) -> int:
+    """Return szDecimals for a coin from HL meta (controls order size precision)."""
+    data = _post({"type": "meta"})
+    asset = next((a for a in data["universe"] if a["name"] == coin), None)
+    return asset["szDecimals"] if asset else 5
+
+
 def _sz_from_usd(coin: str, sz_usd: float) -> float:
     """Convert a USD notional to coin quantity using current mid price."""
     mids = get_all_mids()
     px = mids.get(coin)
     if not px:
         raise ValueError(f"No mid price found for {coin}")
-    return round(sz_usd / px, 6)
+    decimals = _sz_decimals(coin)
+    return round(sz_usd / px, decimals)
 
 
 # ---------------------------------------------------------------------------
