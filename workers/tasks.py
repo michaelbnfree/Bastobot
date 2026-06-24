@@ -509,6 +509,7 @@ def _call_model(models, content):
         raise RuntimeError(data.get('error', {}).get('message', str(data)))
     return data['choices'][0]['message']['content']
 
+
 _SNAPSHOT_KEYWORDS = (
     "snapshot", "market overview", "market update", "market check",
     "scalp", "day trade", "daytrade", "intraday",
@@ -562,6 +563,10 @@ def _handle_scanner_command(prompt: str) -> str | None:
     if pl in ("my trades", "open trades", "trades", "show trades", "positions"):
         from skills.trade_monitor import format_open_trades
         return format_open_trades()
+
+    if pl in ("closed trades", "trade history", "past trades", "recent trades"):
+        from skills.trade_monitor import format_closed_trades
+        return format_closed_trades()
 
     # "close trade ETH" / "close ETH trade" / "close ETH"
     m = _re.match(r'^close(?:\s+trade)?\s+([A-Za-z0-9]+)$', pl)

@@ -136,6 +136,73 @@ def handle_photo(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
+@bot.message_handler(commands=['kill'])
+def handle_kill(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    from skills.active.hyperliquid import set_kill_switch
+    bot.reply_to(message, set_kill_switch(True))
+
+
+@bot.message_handler(commands=['resume'])
+def handle_resume(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    from skills.active.hyperliquid import set_kill_switch
+    bot.reply_to(message, set_kill_switch(False))
+
+
+@bot.message_handler(commands=['approve'])
+def handle_approve(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        bot.reply_to(message, "Usage: /approve <token>")
+        return
+    token = parts[1]
+    key = f"hl:risk:pending:{token}"
+    if _redis.exists(key):
+        _redis.set(key, "approve")
+        bot.reply_to(message, f"✅ Trade {token} approved — executing.")
+    else:
+        bot.reply_to(message, f"⚠️ No pending trade with token {token}.")
+
+
+@bot.message_handler(commands=['reject'])
+def handle_reject(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        bot.reply_to(message, "Usage: /reject <token>")
+        return
+    token = parts[1]
+    key = f"hl:risk:pending:{token}"
+    if _redis.exists(key):
+        _redis.set(key, "reject")
+        bot.reply_to(message, f"🚫 Trade {token} rejected.")
+    else:
+        bot.reply_to(message, f"⚠️ No pending trade with token {token}.")
+
+
+@bot.message_handler(commands=['riskstatus'])
+def handle_riskstatus(message):
+    if message.from_user.id != AUTHORIZED_ID:
+        return
+    from skills.active.hyperliquid import get_risk_status
+    s = get_risk_status()
+    lines = [
+        f"{'🛑' if s['kill_switch'] else '✅'} Kill switch: {'ON' if s['kill_switch'] else 'off'}",
+        f"{'🔐' if s['manual_confirm'] else '🤖'} Manual confirm: {'ON' if s['manual_confirm'] else 'off'}",
+        f"💰 Max trade: ${s['max_trade_usd']:,.0f}",
+        f"📉 Daily loss limit: ${s['daily_loss_limit']:,.0f}",
+        f"📊 Today's loss: ${s['today_loss_usd']:,.2f}" if s['today_loss_usd'] is not None else "📊 Today's loss: (no baseline yet)",
+        f"🏦 Current equity: ${s['current_equity']:,.2f}" if s['current_equity'] is not None else "🏦 Current equity: unavailable",
+    ]
+    bot.reply_to(message, "\n".join(lines))
+
+
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
     if message.from_user.id != AUTHORIZED_ID:
@@ -174,9 +241,26 @@ def _watchdog():
 
 threading.Thread(target=_watchdog, daemon=True).start()
 
+try:
+    bot.delete_webhook()
+    print("[STARTUP] Webhook cleared.")
+except Exception as e:
+    print(f"[STARTUP] delete_webhook failed: {e}")
+
 while True:
     try:
         bot.polling(non_stop=False, timeout=20, long_polling_timeout=15)
+    except telebot.apihelper.ApiTelegramException as e:
+        if "409" in str(e):
+            print(f"[POLLING] Webhook conflict detected — clearing and retrying")
+            try:
+                bot.send_message(AUTHORIZED_ID, "⚠️ Barry: webhook conflict detected, clearing webhook...")
+                bot.delete_webhook()
+            except Exception as inner:
+                print(f"[POLLING] Failed to clear webhook: {inner}")
+        else:
+            print(f"[POLLING] Telegram error: {e} — retrying in 5s")
+        time.sleep(5)
     except Exception as e:
         print(f"[POLLING] Crashed: {e} — retrying in 5s")
         time.sleep(5)
