@@ -1,6 +1,16 @@
 """
-Verified BTC snapshot: two API calls 60s apart, anomaly comparison, Notion log,
-JSONL data file, and GitHub Issues for suspect snapshots.
+FRESH DATA MODE (Bad Data Prevention):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Verified BTC snapshot with multi-stage data validation. Prevents stale/corrupt data
+from entering the analysis pipeline by enforcing a three-phase fetch-and-compare protocol:
+
+  1. Discard call (cache buster) — fetch and discard to clear upstream caches
+  2. Dual measurement (30s apart) — fetch twice, compare for consistency
+  3. Validation + retry — flag anomalies, auto-retry if suspect
+
+Only approved data reaches the LLM prompt. Bad sources are scrubbed.
+Logged to Notion + JSONL + GitHub Issues (suspect snapshots).
+
 Called by the cron job and by Telegram snapshot requests.
 """
 
@@ -374,7 +384,14 @@ def open_github_issue(flags: list[str], data: dict, notion_url: str | None, tag:
 
 def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: str = "swing") -> tuple[str, list[str]]:
     """
-    Two API calls 60s apart. Returns (snapshot_text, flags).
+    FRESH DATA MODE: Multi-stage data validation pipeline.
+
+    Prevents bad/stale data from entering analysis by enforcing:
+      1. Discard call (cache buster)
+      2. Dual fetch + compare (30s apart)
+      3. Validation + auto-retry on suspect
+
+    Returns (snapshot_text, flags).
     Logs to Notion, JSONL, and GitHub (if suspect).
     """
     import sys
