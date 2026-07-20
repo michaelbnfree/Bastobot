@@ -176,8 +176,22 @@ def run_scan() -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _clear_stale_cache() -> None:
+    """Clear cache on startup to force fresh data fetch."""
+    from skills.watchlist import get_all_symbols
+    symbols = get_all_symbols()
+    for symbol in symbols:
+        key = f"scanner:cache:{symbol}"
+        if _r.delete(key):
+            print(f"[STARTUP] Cleared stale cache for {symbol}")
+        else:
+            print(f"[STARTUP] No cache for {symbol} (fresh start)")
+
+
 def main() -> None:
     print("[SCANNER] BastoBot scanner service starting...")
+    _clear_stale_cache()
+    time.sleep(1)  # Brief pause before first scan
     while True:
         try:
             check_triggers(datetime.now(timezone.utc))

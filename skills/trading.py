@@ -1,8 +1,22 @@
 import os
 import time
 import requests
+import numpy as np
+import pandas as pd
+import redis as _redis_lib
+from datetime import datetime, date, timezone
 from tradingview_ta import TA_Handler, Interval
 from dotenv import load_dotenv
+
+_r = _redis_lib.Redis(host="localhost", port=6379, db=0)
+
+# TradingView rate limits
+_TV_USER_DAILY_LIMIT = 4  # User-requested calls per day
+_TV_FALLBACK_HOURLY_LIMIT = 15  # Automatic fallback per hour (circuit breaker if exceeded)
+_TV_FALLBACK_CIRCUIT_THRESHOLD = 10  # Consecutive fallbacks → alert (local is broken)
+
+_TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+_TG_CHAT = int(os.getenv("TELEGRAM_CHAT_ID", 0))
 
 _INTERVAL_MAP = {
     "5m":  Interval.INTERVAL_5_MINUTES,
@@ -46,34 +60,260 @@ def _get_binance_price():
     }
 
 
-def _get_tv_indicators(candles=None):
+def _calculate_rsi(prices, period=14):
+    """Calculate RSI using SMA smoothing (matches TradingView default)."""
+    if len(prices) < period + 1:
+        return None
+    prices = np.array(prices, dtype=float)
+    deltas = np.diff(prices)
+
+    # Separate up and down moves
+    up = np.where(deltas > 0, deltas, 0)
+    down = np.where(deltas < 0, -deltas, 0)
+
+    # Use simple moving average (SMA) smoothing, not Wilder's
+    # This matches TradingView's default RSI calculation
+    up_sma = np.convolve(up, np.ones(period)/period, mode='valid')
+    down_sma = np.convolve(down, np.ones(period)/period, mode='valid')
+
+    if down_sma[-1] == 0:
+        return 100.0 if up_sma[-1] > 0 else 0.0
+
+    rs = up_sma[-1] / down_sma[-1]
+    rsi = 100.0 - 100.0 / (1.0 + rs)
+    return round(rsi, 2)
+
+
+def _calculate_bollinger_bands(prices, period=20, num_std=2):
+    """Calculate Bollinger Bands (20 SMA, 2 stdev)."""
+    if len(prices) < period:
+        return None, None, None
+    prices = np.array(prices, dtype=float)
+    sma = np.mean(prices[-period:])
+    std = np.std(prices[-period:])
+    bb_upper = round(sma + (num_std * std), 2)
+    bb_lower = round(sma - (num_std * std), 2)
+    bb_basis = round(sma, 2)
+    return bb_upper, bb_basis, bb_lower
+
+
+def _get_local_indicators(symbol, candles=None):
+    """Compute indicators locally from Binance candles (primary path, no external API)."""
+    pair = f"{symbol}USDT"
+    tfs = candles or ("1h", "4h", "1d")
+    results = {}
+
+    interval_map = {"1h": "1h", "4h": "4h", "1d": "1d"}
+    candle_counts = {"1h": 300, "4h": 300, "1d": 100}
+
+    for tf in tfs:
+        if tf not in interval_map:
+            continue
+        try:
+            resp = requests.get(
+                "https://api.binance.com/api/v3/klines",
+                params={"symbol": pair, "interval": tf, "limit": candle_counts[tf]},
+                timeout=10
+            )
+            klines = resp.json()
+            if not klines:
+                continue
+
+            # Include current forming candle for live momentum (matches TradingView default)
+            closes = [float(k[4]) for k in klines]
+            highs = [float(k[2]) for k in klines]
+            lows = [float(k[3]) for k in klines]
+
+            rsi = _calculate_rsi(closes, 14)
+            bb_upper, bb_basis, bb_lower = _calculate_bollinger_bands(closes, 20, 2)
+
+            if rsi is not None and bb_upper is not None:
+                results[tf] = {
+                    "summary": {"RECOMMENDATION": "NEUTRAL", "BUY": 0, "SELL": 0, "NEUTRAL": 0},
+                    "rsi": rsi,
+                    "macd": 0,
+                    "macd_signal": 0,
+                    "adx": 0,
+                    "ema_20": 0,
+                    "ema_50": 0,
+                    "ema_200": 0,
+                    "bb_upper": bb_upper,
+                    "bb_lower": bb_lower,
+                    "bb_basis": bb_basis,
+                }
+        except Exception as e:
+            print(f"[TA-LOCAL] {tf} fetch failed: {e}")
+
+    return results if results else None
+
+
+def _send_telegram_alert(text: str) -> None:
+    """Send Telegram alert for rate limit hits."""
+    if not _TG_TOKEN or not _TG_CHAT:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage",
+            json={"chat_id": _TG_CHAT, "text": text, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[TG-ALERT] Failed to send: {e}")
+
+
+def _check_tv_user_request_limit(symbol: str, user_id: str = "manual") -> tuple[bool, int]:
+    """
+    Check if user-requested TV call is allowed. Returns (allowed, remaining_today).
+    Increments counter only if allowed. Sends alert if limit hit.
+    """
+    today = date.today().isoformat()
+    key = f"tv_user_calls:{today}"
+
+    current_calls = int(_r.get(key) or 0)
+    remaining = _TV_USER_DAILY_LIMIT - current_calls
+
+    if current_calls >= _TV_USER_DAILY_LIMIT:
+        msg = f"⚠️ *TradingView API limit hit*\n{_TV_USER_DAILY_LIMIT}/day cap reached.\nTry again tomorrow or use local indicators."
+        print(f"[TV-USER-LIMIT] Daily cap hit ({_TV_USER_DAILY_LIMIT}/day). User {user_id} rejected for {symbol}.")
+        _send_telegram_alert(msg)
+        return False, 0
+
+    _r.incr(key)
+    _r.expire(key, 86400)
+    remaining = _TV_USER_DAILY_LIMIT - (current_calls + 1)
+    print(f"[TV-USER-REQUEST] {user_id} requesting {symbol} ({remaining} remaining today)")
+    return True, remaining
+
+
+def _check_tv_fallback_hourly_limit(symbol: str) -> bool:
+    """
+    Check if automatic fallback is allowed this hour. Returns True if allowed.
+    Enforces {_TV_FALLBACK_HOURLY_LIMIT} per hour to detect broken local pipeline.
+    """
+    now = datetime.now(timezone.utc)
+    hour_key = f"tv_fallback:hour:{now.strftime('%Y-%m-%d-%H')}"
+
+    current_hour_calls = int(_r.get(hour_key) or 0)
+
+    if current_hour_calls >= _TV_FALLBACK_HOURLY_LIMIT:
+        print(f"[TV-FALLBACK-LIMIT] Hourly cap hit ({_TV_FALLBACK_HOURLY_LIMIT}/hour) for {symbol}. Local pipeline may be broken.")
+        return False
+
+    _r.incr(hour_key)
+    _r.expire(hour_key, 3600)  # 1-hour TTL
+    return True
+
+
+def _track_fallback_consecutive(symbol: str, success: bool) -> int:
+    """Track consecutive fallback triggers. Returns current consecutive count."""
+    key = f"tv_fallback:consecutive"
+
+    if success:
+        # Reset on success
+        _r.delete(key)
+        return 0
+    else:
+        # Increment on fallback
+        count = int(_r.incr(key) or 0)
+        _r.expire(key, 3600)  # Reset if no fallback for 1 hour
+        return count
+
+
+def _check_fallback_circuit_breaker(symbol: str, consecutive: int) -> None:
+    """Alert if consecutive fallbacks indicate broken local pipeline."""
+    if consecutive >= _TV_FALLBACK_CIRCUIT_THRESHOLD:
+        msg = (
+            f"🚨 *Local indicators failing*\n"
+            f"{consecutive} consecutive TradingView fallbacks for {symbol}.\n"
+            f"Local Binance fetch is likely broken. Check scanner logs."
+        )
+        print(f"[CIRCUIT-BREAKER] {consecutive} consecutive fallbacks for {symbol} — alerting!")
+        _send_telegram_alert(msg)
+
+
+def _get_tv_indicators_internal(symbol, candles=None) -> dict | None:
+    """Internal TradingView fetch (no limit). Used by automatic fallback and user requests."""
+    pair = f"{symbol}USDT"
     tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
     results = {}
     for i, (label, interval) in enumerate(tfs):
         if i > 0:
-            time.sleep(2)
-        try:
-            h = TA_Handler(symbol="BTCUSDT", screener="crypto", exchange="BINANCE", interval=interval)
-            a = h.get_analysis()
-            bb_upper = a.indicators.get("BB.upper")
-            bb_lower = a.indicators.get("BB.lower")
-            bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
-            results[label] = {
-                "summary": a.summary,
-                "rsi": round(a.indicators["RSI"], 2),
-                "macd": round(a.indicators["MACD.macd"], 4),
-                "macd_signal": round(a.indicators["MACD.signal"], 4),
-                "adx": round(a.indicators["ADX"], 2),
-                "ema_20": round(a.indicators["EMA20"], 2),
-                "ema_50": round(a.indicators["EMA50"], 2),
-                "ema_200": round(a.indicators["EMA200"], 2),
-                "bb_upper": round(bb_upper, 2) if bb_upper else None,
-                "bb_lower": round(bb_lower, 2) if bb_lower else None,
-                "bb_basis": bb_basis,
-            }
-        except Exception as e:
-            print(f"[TA] {label} fetch failed, skipping: {e}")
+            time.sleep(4)  # Delay between requests to respect rate limits
+
+        retry_delay = 5
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                h = TA_Handler(symbol=pair, screener="crypto", exchange="BINANCE", interval=interval)
+                a = h.get_analysis()
+                bb_upper = a.indicators.get("BB.upper")
+                bb_lower = a.indicators.get("BB.lower")
+                bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
+                results[label] = {
+                    "summary": a.summary,
+                    "rsi": round(a.indicators["RSI"], 2),
+                    "macd": round(a.indicators["MACD.macd"], 4),
+                    "macd_signal": round(a.indicators["MACD.signal"], 4),
+                    "adx": round(a.indicators["ADX"], 2),
+                    "ema_20": round(a.indicators["EMA20"], 2),
+                    "ema_50": round(a.indicators["EMA50"], 2),
+                    "ema_200": round(a.indicators["EMA200"], 2),
+                    "bb_upper": round(bb_upper, 2) if bb_upper else None,
+                    "bb_lower": round(bb_lower, 2) if bb_lower else None,
+                    "bb_basis": bb_basis,
+                }
+                break  # Success, exit retry loop
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    print(f"[TA] {label} rate limited, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    print(f"[TA] {label} fetch failed, skipping: {e}")
+                    break
     return results
+
+
+def get_tv_indicators_user_request(symbol: str, candles=None, user_id: str = "manual") -> dict | None:
+    """
+    User-requested TradingView data (e.g., via Telegram /tv command).
+    Subject to 4-call/day hard limit with Telegram alerts.
+    Returns None if limit exceeded.
+    """
+    allowed, remaining = _check_tv_user_request_limit(symbol, user_id)
+    if not allowed:
+        return None
+    return _get_tv_indicators_internal(symbol, candles)
+
+
+def _get_tv_indicators_fallback(symbol, candles=None):
+    """
+    TradingView automatic fallback (hourly cap 15/hour, circuit breaker at 10 consecutive).
+    Called if local indicators fail. Logs every trigger for visibility into degradation.
+    """
+    # Log every fallback trigger (not just failures)
+    print(f"[TV-FALLBACK] Local indicators failed for {symbol}, attempting TradingView fallback...")
+
+    # Check hourly rate limit
+    if not _check_tv_fallback_hourly_limit(symbol):
+        consecutive = _track_fallback_consecutive(symbol, False)
+        _check_fallback_circuit_breaker(symbol, consecutive)
+        return None
+
+    # Attempt fetch
+    result = _get_tv_indicators_internal(symbol, candles)
+
+    if result:
+        # Success — reset consecutive counter
+        _track_fallback_consecutive(symbol, True)
+        print(f"[TV-FALLBACK] Success for {symbol}")
+        return result
+    else:
+        # Failed — track consecutive failures
+        consecutive = _track_fallback_consecutive(symbol, False)
+        _check_fallback_circuit_breaker(symbol, consecutive)
+        print(f"[TV-FALLBACK] Failed for {symbol} ({consecutive} consecutive)")
+        return None
 
 
 def _get_fear_greed():
@@ -373,7 +613,7 @@ def get_btc_analysis(candles=None):
     result = {}
     sources = [
         ("binance", _get_binance_price),
-        ("ta", lambda: _get_tv_indicators(candles)),
+        ("ta", lambda: _get_local_indicators("BTC", candles) or _get_tv_indicators_fallback("BTC", candles)),
         ("derivatives", _get_derivatives),
         ("bybit", _get_bybit),
         ("okx", _get_okx),
@@ -423,35 +663,10 @@ def get_asset_analysis(symbol: str, candles=None) -> dict:
     except Exception as e:
         result["binance_error"] = str(e)
 
-    # Multi-TF TradingView TA
+    # Multi-TF TA (Local Binance candles primary, TradingView fallback)
     try:
-        ta_results = {}
-        tfs = [(c, _INTERVAL_MAP[c]) for c in (candles or ("1h", "4h", "1d")) if c in _INTERVAL_MAP]
-        for i, (label, interval) in enumerate(tfs):
-            if i > 0:
-                time.sleep(2)
-            try:
-                h = TA_Handler(symbol=pair, screener="crypto", exchange="BINANCE", interval=interval)
-                a = h.get_analysis()
-                bb_upper = a.indicators.get("BB.upper")
-                bb_lower = a.indicators.get("BB.lower")
-                bb_basis = round((bb_upper + bb_lower) / 2, 2) if bb_upper and bb_lower else None
-                ta_results[label] = {
-                    "summary": a.summary,
-                    "rsi": round(a.indicators["RSI"], 2),
-                    "macd": round(a.indicators["MACD.macd"], 4),
-                    "macd_signal": round(a.indicators["MACD.signal"], 4),
-                    "adx": round(a.indicators["ADX"], 2),
-                    "ema_20": round(a.indicators["EMA20"], 2),
-                    "ema_50": round(a.indicators["EMA50"], 2),
-                    "ema_200": round(a.indicators["EMA200"], 2),
-                    "bb_upper": round(bb_upper, 2) if bb_upper else None,
-                    "bb_lower": round(bb_lower, 2) if bb_lower else None,
-                    "bb_basis": bb_basis,
-                }
-            except Exception as e:
-                print(f"[TA] {label} fetch failed for {pair}, skipping: {e}")
-        result["ta"] = ta_results
+        ta_results = _get_local_indicators(sym, candles) or _get_tv_indicators_fallback(sym, candles)
+        result["ta"] = ta_results if ta_results else {}
     except Exception as e:
         result["ta_error"] = str(e)
 

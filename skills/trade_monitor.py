@@ -16,9 +16,10 @@ load_dotenv("/root/bastobot/.env")
 
 _r = _redis_lib.Redis(host="localhost", port=6379, db=0)
 
-_LIST_KEY  = "trade_monitor:list"
-_TRADE_KEY = "trade_monitor:{tid}"
-_NOTIF_KEY = "trade_monitor:notified:{tid}:{event}"
+_LIST_KEY      = "trade_monitor:list"
+_TRADE_KEY     = "trade_monitor:{tid}"
+_NOTIF_KEY     = "trade_monitor:notified:{tid}:{event}"
+_CLOSED_TTL    = 86400 * 10   # keep closed trades 10 days for accuracy review, then auto-drop
 
 NOTION_API_KEY      = os.getenv("NOTION_API_KEY")
 NOTION_VERSION      = "2022-06-28"
@@ -148,15 +149,19 @@ def enter_trade(
 
 
 def get_all_trades(status: str | None = None) -> list[dict]:
-    ids    = json.loads(_r.get(_LIST_KEY) or "[]")
-    trades = []
+    ids      = json.loads(_r.get(_LIST_KEY) or "[]")
+    trades   = []
+    live_ids = []
     for tid in ids:
         raw = _r.get(_TRADE_KEY.format(tid=tid))
         if not raw:
             continue
+        live_ids.append(tid)
         t = json.loads(raw)
         if status is None or t.get("status") == status:
             trades.append(t)
+    if live_ids != ids:
+        _r.set(_LIST_KEY, json.dumps(live_ids))
     return trades
 
 
@@ -172,6 +177,28 @@ def get_open_trade(symbol: str) -> dict | None:
     return None
 
 
+def r_multiple(trade: dict, price: float) -> float:
+    """Risk-adjusted return: P&L expressed in multiples of initial risk (entry-to-SL distance)."""
+    risk = abs(trade["entry"] - trade["sl"])
+    if risk == 0:
+        return 0.0
+    if trade["direction"] == "Long":
+        return (price - trade["entry"]) / risk
+    return (trade["entry"] - price) / risk
+
+
+def _update_live_r(tid: str, r: float) -> None:
+    """Refresh the floating R-multiple on an open trade so it tracks price in real time."""
+    raw = _r.get(_TRADE_KEY.format(tid=tid))
+    if not raw:
+        return
+    trade = json.loads(raw)
+    if trade.get("status") != "Open":
+        return
+    trade["r_multiple"] = round(r, 2)
+    _r.set(_TRADE_KEY.format(tid=tid), json.dumps(trade))
+
+
 def check_trades(price_map: dict[str, float]) -> None:
     """Called by scanner loop. Checks every open trade against current prices."""
     for trade in get_all_open():
@@ -182,6 +209,8 @@ def check_trades(price_map: dict[str, float]) -> None:
 
         is_long = trade["direction"] == "Long"
         tid     = trade["id"]
+        live_r  = r_multiple(trade, price)
+        _update_live_r(tid, live_r)
 
         sl_hit  = (is_long and price <= trade["sl"]) or (not is_long and price >= trade["sl"])
         tp1_hit = (is_long and price >= trade["tp1"]) or (not is_long and price <= trade["tp1"])
@@ -202,9 +231,9 @@ def check_trades(price_map: dict[str, float]) -> None:
             _send_tg(
                 f"🛑 *{sym} SL Hit* — {trade['direction']} {trade['horizon']}\n"
                 f"SL: ${trade['sl']:,.2f}  |  Entry: ${trade['entry']:,.2f}\n"
-                f"P&L: {pct:.1f}%"
+                f"P&L: {pct:.1f}%  |  R: {live_r:+.2f}"
             )
-            _update_trade_status(tid, "SL Hit", pct)
+            _update_trade_status(tid, "SL Hit", pct, live_r)
 
         elif tp1_hit and not _r.get(notif_tp1):
             _r.set(notif_tp1, "1")
@@ -212,11 +241,11 @@ def check_trades(price_map: dict[str, float]) -> None:
             _send_tg(
                 f"✅ *{sym} TP1 Hit* — {trade['direction']} {trade['horizon']}\n"
                 f"TP1: ${trade['tp1']:,.2f}  |  Entry: ${trade['entry']:,.2f}\n"
-                f"P&L: {pct:.1f}%"
+                f"P&L: {pct:.1f}%  |  R: {live_r:+.2f}"
                 + (" — move SL to break-even" if trade.get("tp2") else "")
             )
             if not trade.get("tp2"):
-                _update_trade_status(tid, "TP1 Hit", pct)
+                _update_trade_status(tid, "TP1 Hit", pct, live_r)
 
         if tp2_hit and not _r.get(notif_tp2):
             _r.set(notif_tp2, "1")
@@ -224,12 +253,12 @@ def check_trades(price_map: dict[str, float]) -> None:
             _send_tg(
                 f"🎯 *{sym} TP2 Hit* — {trade['direction']} {trade['horizon']}\n"
                 f"TP2: ${trade['tp2']:,.2f}  |  Entry: ${trade['entry']:,.2f}\n"
-                f"P&L: {pct:.1f}% — full target reached"
+                f"P&L: {pct:.1f}%  |  R: {live_r:+.2f} — full target reached"
             )
-            _update_trade_status(tid, "TP2 Hit", pct)
+            _update_trade_status(tid, "TP2 Hit", pct, live_r)
 
 
-def _update_trade_status(tid: str, status: str, pnl_pct: float | None = None) -> None:
+def _update_trade_status(tid: str, status: str, pnl_pct: float | None = None, r: float | None = None) -> None:
     raw = _r.get(_TRADE_KEY.format(tid=tid))
     if not raw:
         return
@@ -238,9 +267,37 @@ def _update_trade_status(tid: str, status: str, pnl_pct: float | None = None) ->
     trade["closed_at"] = datetime.now(timezone.utc).isoformat()
     if pnl_pct is not None:
         trade["pnl_pct"] = round(pnl_pct, 2)
+    if r is not None:
+        trade["r_multiple"] = round(r, 2)
     _r.set(_TRADE_KEY.format(tid=tid), json.dumps(trade))
+    _r.expire(_TRADE_KEY.format(tid=tid), _CLOSED_TTL)
     if trade.get("notion_id"):
         _update_notion_status(trade["notion_id"], status, pnl_pct)
+
+
+def get_recent_closed(days: int = 10) -> list[dict]:
+    """Closed trades within the retention window, newest first — for accuracy review."""
+    cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
+    closed = [t for t in get_all_trades() if t.get("status") != "Open" and t.get("closed_at")]
+    closed = [t for t in closed if datetime.fromisoformat(t["closed_at"]).timestamp() >= cutoff]
+    return sorted(closed, key=lambda t: t["closed_at"], reverse=True)
+
+
+def format_closed_trades() -> str:
+    trades = get_recent_closed()
+    if not trades:
+        return "No closed trades in the last 10 days."
+    lines = [f"📋 *Closed Trades (last 10 days, {len(trades)}):*\n"]
+    for i, t in enumerate(trades, 1):
+        r     = t.get("r_multiple")
+        r_str = f"{r:+.2f}R" if r is not None else "—"
+        lines.append(f"{i}. *{t['symbol']} {t['direction']}* — {t['status']} | {r_str} | {t['horizon'].capitalize()}")
+    rs = [t["r_multiple"] for t in trades if t.get("r_multiple") is not None]
+    if rs:
+        avg_r    = sum(rs) / len(rs)
+        win_rate = sum(1 for r in rs if r > 0)
+        lines.append(f"\nAvg R: {avg_r:+.2f}  |  Win rate: {win_rate}/{len(rs)}")
+    return "\n".join(lines)
 
 
 def close_trade(symbol: str, status: str = "Closed") -> tuple[bool, str]:
@@ -259,12 +316,13 @@ def format_open_trades() -> str:
     for i, t in enumerate(trades, 1):
         tp2_str  = f"  TP2: ${t['tp2']:,.2f}" if t.get("tp2") else ""
         conv_str = f"  Conviction: {t['conviction']}" if t.get("conviction") else ""
+        r_str    = f"  R: {t['r_multiple']:+.2f}" if t.get("r_multiple") is not None else ""
         notion   = f"\n  [📓 View in Notion]({t['notion_url']})" if t.get("notion_url") else ""
         # Quick live context: how far from entry/TP/SL
         lines.append(
             f"{i}. *{t['symbol']} {t['direction']}* — {t['horizon'].capitalize()}{conv_str}\n"
             f"  Entry: ${t['entry']:,.2f}  SL: ${t['sl']:,.2f}\n"
-            f"  TP1: ${t['tp1']:,.2f}{tp2_str}"
+            f"  TP1: ${t['tp1']:,.2f}{tp2_str}{r_str}"
             f"{notion}"
         )
     return "\n".join(lines)

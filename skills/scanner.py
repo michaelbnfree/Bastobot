@@ -62,11 +62,36 @@ def fetch_and_cache(symbol: str, candles: tuple = ("1h", "4h", "1d")) -> dict | 
         return None
 
 
+def _has_valid_indicators(data: dict) -> bool:
+    """Check if cached data has required indicators (RSI, Bollinger bands)."""
+    if not data:
+        return False
+
+    ta = data.get("ta")
+    if not ta:
+        return False
+
+    for tf in ["1h", "4h", "1d"]:
+        if tf not in ta:
+            return False
+        ind = ta[tf]
+        if not ind.get("rsi") or not ind.get("bb_upper") or not ind.get("bb_lower"):
+            print(f"[SCANNER] Invalid indicators for {tf}: RSI={ind.get('rsi')}, BB={ind.get('bb_upper')}")
+            return False
+    return True
+
+
 def get_cached(symbol: str) -> dict | None:
     raw = _r.get(_CACHE_KEY.format(symbol=symbol))
     if not raw:
         return None
-    return json.loads(raw).get("data")
+    data = json.loads(raw).get("data")
+
+    if not _has_valid_indicators(data):
+        print(f"[SCANNER] Cache validation failed for {symbol} — forcing refresh")
+        return None
+
+    return data
 
 
 def cache_age_seconds(symbol: str) -> float | None:
