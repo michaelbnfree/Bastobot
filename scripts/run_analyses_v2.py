@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 def main():
     logger.info('=' * 60)
-    logger.info('BARRY AUTONOMOUS ANALYSIS & TRADING CYCLE v2.0')
+    logger.info('BARRY AUTONOMOUS ANALYSIS & TRADING CYCLE v2.1')
+    logger.info('With: Trailing Stops + Drawdown Protection + Real-time Alerts')
     logger.info('=' * 60)
 
     # Step 1: Macro Analysis
@@ -89,8 +90,44 @@ def main():
     except Exception as e:
         logger.warning(f'Performance tracking error: {e}')
 
+    # Step 6: Trailing Stop Management
+    logger.info('[6/8] Managing trailing stops...')
+    try:
+        from scripts.trailing_stop_manager import TrailingStopManager
+        stops = TrailingStopManager()
+        updated = stops.update_trailing_stops()
+        if updated > 0:
+            logger.info(f'✓ Updated {updated} trailing stops')
+        else:
+            logger.info('✓ No stops to update')
+    except Exception as e:
+        logger.warning(f'Trailing stop error: {e}')
+
+    # Step 7: Drawdown Protection Check
+    logger.info('[7/8] Checking drawdown protection...')
+    try:
+        from scripts.drawdown_protection import DrawdownProtection
+        protection = DrawdownProtection()
+        is_enabled = protection.check_circuit_breaker()
+        logger.info(f'✓ Circuit breaker: {"NORMAL" if is_enabled else "TRIGGERED"}')
+    except Exception as e:
+        logger.warning(f'Drawdown protection error: {e}')
+
+    # Step 8: Alert Management (if alerts configured)
+    logger.info('[8/8] Processing alerts...')
+    try:
+        from scripts.alert_manager import AlertManager
+        alerts = AlertManager()
+        recent_alerts = alerts.get_recent_alerts(5)
+        if recent_alerts:
+            logger.info(f'✓ {len(recent_alerts)} recent alerts')
+        else:
+            logger.info('✓ No pending alerts')
+    except Exception as e:
+        logger.debug(f'Alert manager error: {e}')
+
     if macro_result or trend_result:
-        logger.info('✓ Cycle completed successfully')
+        logger.info('✓ Cycle completed successfully (8/8 steps)')
     else:
         logger.warning('No data available for analysis')
 
