@@ -367,9 +367,31 @@ class AutonomousTraderV2:
             return False
 
     def _execute_hyperliquid_trade(self, decision: dict) -> bool:
-        """Execute trade on Hyperliquid (when enabled)"""
-        logger.info('Hyperliquid live trading not yet implemented')
-        return self._log_paper_trade(decision)
+        """Execute trade on Hyperliquid (live trading)"""
+        try:
+            from scripts.hyperliquid_executor import HyperliquidExecutor
+            executor = HyperliquidExecutor()
+
+            if not executor.authenticated:
+                logger.warning('Hyperliquid not authenticated, falling back to paper trading')
+                return self._log_paper_trade(decision)
+
+            # Place live order
+            success = executor.place_order(decision)
+
+            if success:
+                logger.info(f'✅ Live trade executed on Hyperliquid')
+                # Still log to file for our records
+                self._log_paper_trade(decision)
+                return True
+            else:
+                logger.error('Failed to execute trade on Hyperliquid')
+                return False
+
+        except Exception as e:
+            logger.error(f'Hyperliquid execution error: {e}')
+            # Fall back to paper trading on error
+            return self._log_paper_trade(decision)
 
     def _log_paper_trade(self, decision: dict) -> bool:
         """Log paper trade with detailed signal for win/loss tracking"""
