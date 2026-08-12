@@ -277,13 +277,30 @@ def check_alerts(symbol: str, data: dict) -> list[str]:
             fired.append("chain_leader_move")
 
     # ── CEX/DEX arbitrage opportunity ────────────────────────────────────────
+    from skills.dex_monitor import log_opportunity
     dex_comp = data.get("dex_comparison", {})
     if dex_comp and dex_comp.get("dex_best"):
         arb_pct = dex_comp.get("arbitrage_pct", 0)
         dex_best = dex_comp["dex_best"]
         liquidity = dex_best.get("liquidity", 0)
-        # Only alert on meaningful opportunities: 1%+ spread + sufficient liquidity to execute
-        if abs(arb_pct) >= 1.0 and liquidity >= 500000 and not _cooldown(symbol, "dex_cex_arbitrage", 3600):
+        volume_24h = dex_comp.get("all_dex_prices", {}).get(dex_best["chain"], {}).get(dex_best["dex"], {}).get("volume_24h", 0)
+
+        # Log all opportunities for monitoring (even below-threshold ones)
+        is_alert_worthy = abs(arb_pct) >= 1.0 and liquidity >= 500000
+        log_opportunity(
+            symbol=symbol,
+            chain=dex_best["chain"],
+            dex=dex_best["dex"],
+            spread_pct=arb_pct,
+            dex_price=dex_best["price"],
+            cex_price=price,
+            liquidity=liquidity,
+            volume_24h=volume_24h,
+            is_alert_worthy=is_alert_worthy,
+        )
+
+        # Only alert on meaningful opportunities: 1%+ spread + sufficient liquidity
+        if is_alert_worthy and not _cooldown(symbol, "dex_cex_arbitrage", 3600):
             direction = "SELL on DEX" if arb_pct > 0 else "BUY on DEX"
             arrow = "📊" if abs(arb_pct) < 2 else "🚀"
             send_alert(
