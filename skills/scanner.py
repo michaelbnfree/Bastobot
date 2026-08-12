@@ -278,6 +278,7 @@ def check_alerts(symbol: str, data: dict) -> list[str]:
 
     # ── CEX/DEX arbitrage opportunity ────────────────────────────────────────
     from skills.dex_monitor import log_opportunity
+    from skills.dex_notion_logger import log_arbitrage_opportunity
     dex_comp = data.get("dex_comparison", {})
     if dex_comp and dex_comp.get("dex_best"):
         arb_pct = dex_comp.get("arbitrage_pct", 0)
@@ -298,6 +299,19 @@ def check_alerts(symbol: str, data: dict) -> list[str]:
             volume_24h=volume_24h,
             is_alert_worthy=is_alert_worthy,
         )
+
+        # Log high-gain opportunities to Notion for 3-month dataset
+        if is_alert_worthy:
+            log_arbitrage_opportunity(
+                symbol=symbol,
+                chain=dex_best["chain"],
+                dex=dex_best["dex"],
+                spread_pct=arb_pct,
+                dex_price=dex_best["price"],
+                cex_price=price,
+                liquidity=liquidity,
+                volume_24h=volume_24h,
+            )
 
         # Only alert on meaningful opportunities: 1%+ spread + sufficient liquidity
         if is_alert_worthy and not _cooldown(symbol, "dex_cex_arbitrage", 3600):
