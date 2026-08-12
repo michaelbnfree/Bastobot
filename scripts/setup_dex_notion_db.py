@@ -30,7 +30,7 @@ HEADERS = {
 }
 
 
-def create_database():
+def create_database(parent_page_id: str = None):
     """Create DEX Arbitrage Opportunities database."""
     if not NOTION_API_KEY:
         print("❌ NOTION_API_KEY not found in .env")
@@ -39,9 +39,13 @@ def create_database():
     print("🚀 Creating DEX Arbitrage Opportunities database...")
 
     # Parent should be a Notion page/workspace where user has access
-    # We'll try to create in root, or ask for a parent page ID
+    if parent_page_id:
+        parent = {"type": "page_id", "page_id": parent_page_id.replace("-", "")}
+    else:
+        parent = {"type": "workspace", "workspace": True}
+
     payload = {
-        "parent": {"type": "workspace", "workspace": True},
+        "parent": parent,
         "title": [{"text": {"content": "DEX Arbitrage Opportunities (3-Month Dataset)"}}],
         "properties": {
             "Date": {
@@ -151,7 +155,12 @@ def check_existing():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Create DEX Arbitrage Opportunities database in Notion")
+    parser.add_argument("--page-id", help="Notion page ID where database should be created")
+    args = parser.parse_args()
+
     if check_existing():
         sys.exit(0)
 
-    create_database()
+    create_database(parent_page_id=args.page_id)
