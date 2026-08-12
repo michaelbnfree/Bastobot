@@ -49,8 +49,24 @@ def _cooldown(symbol: str, condition: str, ttl: int) -> bool:
 
 def fetch_and_cache(symbol: str, candles: tuple = ("1h", "4h", "1d")) -> dict | None:
     from skills.trading import get_btc_analysis, get_asset_analysis
+    from skills.dexscreener_client import DexScreenerClient
+
     try:
         data = get_btc_analysis(candles=candles) if symbol == "BTC" else get_asset_analysis(symbol, candles=candles)
+
+        # Fetch DEX prices for CEX/DEX comparison
+        dex_client = DexScreenerClient()
+        cex_price = data.get("binance", {}).get("price")
+        if cex_price:
+            try:
+                dex_comparison = dex_client.compare_dex_cex_prices(symbol, cex_price)
+                data["dex_comparison"] = dex_comparison
+                if dex_comparison.get("arbitrage_pct") and abs(dex_comparison["arbitrage_pct"]) >= 0.5:
+                    print(f"[DEX] {symbol}: {dex_comparison['arbitrage_pct']:+.2f}% arb opportunity")
+            except Exception as e:
+                print(f"[SCANNER] DEX fetch for {symbol} failed: {e}")
+                data["dex_comparison"] = {"error": str(e)}
+
         _r.setex(
             _CACHE_KEY.format(symbol=symbol),
             _CACHE_TTL,
@@ -259,6 +275,25 @@ def check_alerts(symbol: str, data: dict) -> list[str]:
                 f"Price: ${price:,.2f}"
             )
             fired.append("chain_leader_move")
+
+    # ── CEX/DEX arbitrage opportunity ────────────────────────────────────────
+    dex_comp = data.get("dex_comparison", {})
+    if dex_comp and dex_comp.get("dex_best"):
+        arb_pct = dex_comp.get("arbitrage_pct", 0)
+        dex_best = dex_comp["dex_best"]
+        liquidity = dex_best.get("liquidity", 0)
+        # Only alert on meaningful opportunities: 1%+ spread + sufficient liquidity to execute
+        if abs(arb_pct) >= 1.0 and liquidity >= 500000 and not _cooldown(symbol, "dex_cex_arbitrage", 3600):
+            direction = "SELL on DEX" if arb_pct > 0 else "BUY on DEX"
+            arrow = "📊" if abs(arb_pct) < 2 else "🚀"
+            send_alert(
+                f"{arrow} *{symbol} CEX/DEX Arbitrage*\n"
+                f"Spread: {arb_pct:+.2f}% — {direction}\n"
+                f"CEX (Binance): ${price:,.2f}\n"
+                f"DEX ({dex_best['dex']} on {dex_best['chain']}): ${dex_best['price']:,.2f}\n"
+                f"Liquidity: ${liquidity:,.0f}"
+            )
+            fired.append("dex_cex_arbitrage")
 
     return fired
 
