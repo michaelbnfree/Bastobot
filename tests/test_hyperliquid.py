@@ -59,12 +59,13 @@ def test_get_all_mids_filters_empty_string_values(monkeypatch):
     assert "MISSING" not in mids
 
 
-def test_get_all_mids_does_not_filter_string_zero(monkeypatch):
-    """`if v` checks string truthiness, not the numeric value — "0" is a non-empty
-    string and survives the filter as 0.0. Only an actual empty string is dropped."""
+def test_get_all_mids_filters_zero_price_markets(monkeypatch):
+    """A "0" mid price is filtered on its numeric value, not just raw-string emptiness,
+    so a dead/delisted market doesn't show up as a spurious 0.0 price."""
     monkeypatch.setattr(hl, "_post", lambda payload: {"BTC": "50000.5", "DEAD": "0"})
     mids = hl.get_all_mids()
-    assert mids == {"BTC": 50000.5, "DEAD": 0.0}
+    assert mids == {"BTC": 50000.5}
+    assert "DEAD" not in mids
 
 
 # ── _parse_order_result ──────────────────────────────────────────────────────

@@ -159,7 +159,8 @@ def get_candles(interval: str = "1h", lookback_hours: int = 24) -> list[dict]:
 def get_all_mids() -> dict[str, float]:
     """Mid prices for all Hyperliquid perp markets."""
     raw = _post({"type": "allMids"})
-    return {k: float(v) for k, v in raw.items() if v}
+    mids = {k: float(v) for k, v in raw.items() if v}
+    return {k: px for k, px in mids.items() if px}
 
 
 # ---------------------------------------------------------------------------
