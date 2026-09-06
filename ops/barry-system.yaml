@@ -1,0 +1,40 @@
+schema_version: 1
+
+system:
+  name: barry
+  environment: production-paper
+  live_execution_permitted: false
+
+ownership:
+  interface: bastobot-tg.service
+  research_api: bastobot-api.service
+  proposal_evaluator: barry-phase5.service
+  canonical_execution: pending-live-canary
+  legacy_paper_engine: barry.service (disabled and inactive)
+  market_data: manobot-snapshot.service
+
+exchanges:
+  hyperliquid:
+    configured: true
+    enabled: false
+    credential_owner: pending-canonical-engine
+  kraken:
+    configured: true
+    enabled: false
+    credential_owner: pending-canonical-engine
+
+boundaries:
+  bastobot_may_read_account_state: true
+  bastobot_may_mutate_exchange_state: false
+  legacy_paper_engine_may_mutate_exchange_state: false
+
+containment:
+  environment_gate: BASTOBOT_EXCHANGE_MUTATIONS_ENABLED
+  required_value_for_mutation: "true"
+  default: disabled
+
+notes:
+  - BastoBot remains the Telegram, research, dashboard, and proposal layer.
+  - barry-phase5.service evaluates signed proposals but cannot submit exchange orders.
+  - No service is designated as the canonical live execution engine yet.
+  - Enabling exchange mutations requires a reviewed deployment and testnet gate.

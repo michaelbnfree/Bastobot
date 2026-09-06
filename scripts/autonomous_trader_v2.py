@@ -241,8 +241,8 @@ class AutonomousTraderV2:
             current_price = setup.get('entry_price', 0) or indicators.get(asset, {}).get('price', 0)
 
             if not current_price:
-                logger.warning(f'No price data for {asset}, using setup entry price')
-                current_price = setup.get('entry_price', 64000)  # Fallback
+                logger.warning(f'No price data for {asset}; refusing to generate trade proposal')
+                return None
 
             # Get volatility-based range
             volatility_pct = context.get('volatility_pct', 5.0)
@@ -449,11 +449,22 @@ class AutonomousTraderV2:
                 f'SL: {trade_log["stop_loss"]} TP: {trade_log["take_profit"]} '
                 f'R:R: {trade_log["risk_reward_ratio"]:.1f}:1 (confidence: {trade_log["confidence"]:.0%})'
             )
+            self._emit_phase5_proposal(trade_log)
             return True
 
         except Exception as e:
             logger.error(f'Failed to log paper trade: {e}')
             return False
+
+    def _emit_phase5_proposal(self, trade_log: dict) -> None:
+        """Emit a signed Barry Phase 5 proposal when explicitly enabled."""
+        try:
+            from skills.barry_proposals import emit_phase5_proposal
+            path = emit_phase5_proposal(trade_log)
+            if path is not None:
+                logger.info(f'Phase 5 proposal emitted: {path}')
+        except Exception as e:
+            logger.warning(f'Phase 5 proposal emission failed: {e}')
 
     def run(self):
         """Main autonomous trading loop"""
