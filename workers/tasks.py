@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import json
+import subprocess
 import redis
 import requests
 from dotenv import load_dotenv
@@ -12,6 +14,10 @@ OR_KEY = os.getenv("OPENROUTER_API_KEY")
 
 _redis = redis.Redis(host='localhost', port=6379, db=0)
 _TIMING_WINDOW = 10  # rolling average over last N jobs
+_BARRY_LIVE_ROOT = "/home/trading/barry-live"
+_BARRY_LIVE_PYTHON = "/home/trading/barry-live/.venv/bin/python"
+_BARRY_LIVE_LEDGER = "/root/barry-state/live-canary.db"
+_BARRY_LIVE_ACCOUNT = "0x85589329407FBfe44abf31A1F2c6061689a249bd"
 
 
 def record_timing(category, elapsed):
@@ -551,6 +557,93 @@ def _is_snapshot_request(prompt: str) -> bool:
 
 import re as _re
 
+def _format_canary_status(payload: dict) -> str:
+    preflight = payload.get("preflight", {}) if isinstance(payload, dict) else {}
+    audit = payload.get("audit", {}) if isinstance(payload, dict) else {}
+    gate = payload.get("next_canary_gate", {}) if isinstance(payload, dict) else {}
+    report = audit.get("report", {}) if isinstance(audit, dict) else {}
+    readiness = audit.get("micro_live_readiness", {}) if isinstance(audit, dict) else {}
+    kill = payload.get("kill_switch", {}) if isinstance(payload, dict) else {}
+
+    return "\n".join(
+        [
+            "*Barry Canary Status*",
+            f"Overall: {payload.get('status', 'UNKNOWN')}",
+            f"Preflight ready: {preflight.get('ready', 'unknown')}",
+            f"Account flat: positions={preflight.get('active_positions', 'unknown')} orders={preflight.get('open_orders', 'unknown')}",
+            f"Equity: ${preflight.get('equity_usd', 'unknown')}",
+            "",
+            "*Ledger / Exchange Audit*",
+            f"Audit: {audit.get('status', 'unknown')}",
+            f"Complete canaries: {audit.get('complete_canaries', 'unknown')}",
+            f"Incomplete canaries: {audit.get('incomplete_canaries', 'unknown')}",
+            f"Orphan fills: {len(audit.get('orphan_exchange_fill_oids', []) or [])}",
+            f"Missing local fills: {len(audit.get('local_missing_exchange_fill_oids', []) or [])}",
+            "",
+            "*Risk Budget*",
+            f"Daily net PnL: ${report.get('daily_net_pnl_usd', 'unknown')}",
+            f"Daily loss remaining: ${report.get('daily_loss_remaining_usd', 'unknown')}",
+            f"Lifetime net PnL: ${report.get('lifetime_net_pnl_usd', 'unknown')}",
+            "",
+            "*Next Canary Gate*",
+            f"Approved: {gate.get('approved', 'unknown')}",
+            f"Reason: {gate.get('reason', 'unknown')}",
+            "",
+            "*Micro-live*",
+            f"Ready: {readiness.get('approved', 'unknown')}",
+            f"Reason: {readiness.get('reason', 'unknown')}",
+            f"Kill switch active: {kill.get('active', 'unknown')}",
+        ]
+    )
+
+
+def _barry_canary_status() -> str:
+    env = os.environ.copy()
+    env.update(
+        {
+            "BARRY_MODE": "live",
+            "BARRY_LIVE_EXECUTION_PERMITTED": "true",
+            "BARRY_LIVE_CANARY_CONFIRM": "RISK_REAL_FUNDS_CANARY_ONLY",
+            "BARRY_TARGET_RISK_USD": "0.10",
+            "BARRY_MAX_NOTIONAL_USD": "12.50",
+            "BARRY_MAX_GROSS_EXPOSURE_USD": "12.50",
+            "BARRY_MAX_SYMBOL_EXPOSURE_USD": "12.50",
+            "PYTHONPATH": "src",
+        }
+    )
+    result = subprocess.run(
+        [
+            _BARRY_LIVE_PYTHON,
+            "-m",
+            "barry_engine.live_canary_cli",
+            "--database",
+            _BARRY_LIVE_LEDGER,
+            "--account-address",
+            _BARRY_LIVE_ACCOUNT,
+            "--symbol",
+            "BTC",
+            "--minimum-equity-usd",
+            "19.50",
+            "--minimum-notional-usd",
+            "10",
+            "--no-telegram",
+            "verify",
+        ],
+        cwd=_BARRY_LIVE_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if not result.stdout.strip():
+        return f"Barry canary status unavailable: {result.stderr.strip() or 'no output'}"
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return "Barry canary status returned malformed output."
+    return _format_canary_status(payload)
+
 def _handle_scanner_command(prompt: str) -> str | None:
     """
     Intercepts scanner/watchlist/trade commands before the LLM pipeline.
@@ -560,6 +653,9 @@ def _handle_scanner_command(prompt: str) -> str | None:
         return None
     p = prompt.strip()
     pl = p.lower()
+
+    if pl in ("canarystatus", "/canarystatus", "microstatus", "/microstatus"):
+        return _barry_canary_status()
 
     # ── Watchlist ─────────────────────────────────────────────────────────────
     # "watch SOL" or "watch SOL - solana L1 narrative"

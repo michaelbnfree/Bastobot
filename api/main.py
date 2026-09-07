@@ -13,7 +13,7 @@ q = Queue('fast', connection=redis_conn)
 
 EXPLICIT_FINANCIAL_PATTERNS = [
     # Direct bot/scanner/trade commands
-    r"^(scan|watch|unwatch|hot trades|top trades|top setups|open trades|my trades|positions|pnl)\b",
+    r"^/?(scan|watch|unwatch|hot trades|top trades|top setups|open trades|my trades|positions|pnl|canarystatus|microstatus)\b",
 
     # Explicit trade-entry / management commands
     r"^(trade|enter trade|monitor|close trade)\b",
