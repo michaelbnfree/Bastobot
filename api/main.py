@@ -1,3 +1,5 @@
+import re
+
 from fastapi import FastAPI, Request
 from redis import Redis
 from rq import Queue
@@ -9,22 +11,29 @@ app.include_router(result_router)
 redis_conn = Redis(host='localhost', port=6379)
 q = Queue('fast', connection=redis_conn)
 
-FINANCIAL_KEYWORDS = [
-    'btc', 'eth', 'xion', 'soyboy', 'crypto', 'coin', 'token',
-    'price', 'trade', 'trading', 'chart', 'candle', 'market',
-    'stock', 'forex', 'futures', 'perpetual', 'long', 'short',
-    'rsi', 'macd', 'support', 'resistance', 'breakout', 'bullish', 'bearish',
-    'usdt', 'usd', 'leverage', 'liquidat', 'position', 'entry', 'target', 'stop',
-    'limit', 'order', 'buy', 'sell', 'signal', 'trend', 'pump', 'dump',
-    'wick', 'level', 'setup', 'tp', 'sl', 'pnl', 'profit', 'loss',
-    # Scanner / watchlist / trade monitor commands
-    'watch', 'unwatch', 'watchlist', 'hot trades', 'top trades', 'top setups',
-    'my trades', 'open trades', 'conviction', 'monitor', 'scan',
+EXPLICIT_FINANCIAL_PATTERNS = [
+    # Direct bot/scanner/trade commands
+    r"^(scan|watch|unwatch|hot trades|top trades|top setups|open trades|my trades|positions|pnl)\b",
+
+    # Explicit trade-entry / management commands
+    r"^(trade|enter trade|monitor|close trade)\b",
+
+    # Common crypto tickers and stablecoins
+    r"\b(btc|eth|sol|hype|xrp|bnb|doge|sui|near|avax|usdc|usdt)\b",
+
+    # Crypto/trading-specific language
+    r"\b(crypto|chart|long|short|leverage|funding|liquidation|perp|perps|futures|rsi|macd|support|resistance)\b",
+
+    # Contextual market phrases only; avoid casual phrases like "farmers market"
+    r"\b(crypto market|market structure|market update|market scan|market setup)\b",
 ]
 
 def classify(msg: str) -> str:
-    if any(w in msg.lower() for w in FINANCIAL_KEYWORDS):
+    msg_lower = msg.strip().lower()
+
+    if any(re.search(pattern, msg_lower) for pattern in EXPLICIT_FINANCIAL_PATTERNS):
         return 'financial'
+
     return 'medium'
 
 @app.post("/query")
