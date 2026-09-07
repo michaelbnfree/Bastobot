@@ -484,6 +484,12 @@ def run_verified_snapshot(tag: str = "scheduled", asset: str = "BTC", horizon: s
     instruction = build_snapshot_instruction(horizon, asset, open_trade=open_trade)
     prompt = f"{instruction}\n\n{flag_header}{prev_context}{asset.lower()} snapshot\n\n{market_text}"
     snapshot_text = _call_model(TEXT_MODELS, prompt)
+
+    # Prepend current timestamp to snapshot
+    now = datetime.now(timezone.utc)
+    timestamp_str = f"**Snapshot Time:** {now.strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
+    snapshot_text = timestamp_str + snapshot_text
+
     _store_trade_idea(snapshot_text, best_data, asset, horizon)
 
     bias = _extract_bias(snapshot_text)

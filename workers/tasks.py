@@ -458,6 +458,11 @@ def _fetch_market_data(asset="BTC", candles=None, data=None):
     return None
 
 def _build_content(prompt, category, image_b64, mime_type):
+    # Inject current date so model knows it's 2026, not training data cutoff
+    from datetime import datetime
+    current_date = datetime.utcnow().strftime("%B %d, %Y")
+    date_context = f"[Current Date: {current_date}]"
+
     if image_b64:
         instruction = TRADING_INSTRUCTION if category in ('financial', 'vision') else ""
         text = f"{instruction}\n\n{prompt}".strip() if instruction else (prompt or "Analyse this chart.")
@@ -469,18 +474,38 @@ def _build_content(prompt, category, image_b64, mime_type):
         asset = _detect_asset(prompt)
         instruction = TRADING_INSTRUCTION.replace("BTC", asset)
         market = _fetch_market_data(asset)
-        base = f"{instruction}\n\n{prompt}".strip()
+
+        # Inject brain context (past trades, patterns, watchlist)
+        try:
+            from skills.brain import get_brain_context
+            brain_ctx = get_brain_context(symbol=asset)
+            if brain_ctx:
+                market = f"{brain_ctx}\n\n{market}" if market else brain_ctx
+        except Exception as e:
+            print(f"[BRAIN] Context injection failed: {e}")
+
+        # Save query to memory for "what's latest" tracking
+        try:
+            from skills.query_memory import save_query
+            save_query(prompt, category, asset)
+        except Exception as e:
+            print(f"[QUERY_MEMORY] Save failed: {e}")
+
+        base = f"{date_context}\n\n{instruction}\n\n{prompt}".strip()
         return f"{base}\n\n{market}" if market else base
     if category == 'vision':
         return f"{TRADING_INSTRUCTION}\n\n{prompt}".strip()
-    # For all other text queries, inject current time so the model knows "now"
-    try:
-        from skills.time import get_time_context
-        time_ctx = get_time_context()
-        return f"{time_ctx}\n\n{prompt}" if prompt else prompt
-    except Exception:
-        pass
-    return prompt
+    # For text queries, only inject time if explicitly asking for it
+    time_keywords = ["time", "timezone", "tz", "utc", "what time", "current time", "when is", "what's the time"]
+    if prompt and any(kw in prompt.lower() for kw in time_keywords):
+        try:
+            from skills.time import get_time_context
+            time_ctx = get_time_context()
+            return f"{date_context}\n\n{time_ctx}\n\n{prompt}" if prompt else prompt
+        except Exception:
+            pass
+    # Always include current date so model doesn't default to training data
+    return f"{date_context}\n\n{prompt}" if prompt else prompt
 
 TEXT_MODELS = [
     "google/gemini-2.0-flash-001",
@@ -738,6 +763,24 @@ def process_task(prompt, category=None, *args, image_b64=None, mime_type="image/
                 return cmd_response
         except Exception as e:
             print(f"[CMD] Handler error: {e}")
+
+    # Query memory: handle "what's latest" intelligently
+    if not image_b64:
+        try:
+            from skills.query_memory import get_context_prompt, get_last_query
+            keywords = ["latest", "what's new", "update", "whats new", "what's the latest"]
+            if any(kw in prompt.lower() for kw in keywords):
+                last = get_last_query()
+                if not last:
+                    # No prior context — refuse and ask for specificity
+                    return "🔍 **What's latest?** Please specify:\n- Latest price/analysis on BTC, ETH, or SOL?\n- Updates on a specific pattern?\n- Market conditions?\n\nI only track market data and your brain. No news sources."
+
+                context_prompt = get_context_prompt(prompt)
+                if context_prompt:
+                    prompt = context_prompt
+                    print(f"[QUERY_MEMORY] Updated prompt: {prompt[:60]}")
+        except Exception as e:
+            print(f"[QUERY_MEMORY] Error: {e}")
 
     # Verified snapshot flow: two API calls 60s apart + Notion log
     if category == "financial" and not image_b64 and _is_snapshot_request(prompt):
