@@ -17,6 +17,8 @@ from typing import Optional
 
 sys.path.insert(0, '/root/bastobot')
 
+from skills.execution_gate import exchange_mutations_enabled
+
 load_dotenv('/root/bastobot/.env')
 
 logging.basicConfig(
@@ -51,7 +53,10 @@ class HyperliquidExecutor:
         self.session = requests.Session()
         self.base_url = HYPERLIQUID_BASE_URL
 
-        if not HYPERLIQUID_API_KEY or not HYPERLIQUID_PRIVATE_KEY:
+        if not exchange_mutations_enabled():
+            logger.warning('BastoBot exchange mutations are disabled by containment policy')
+            self.authenticated = False
+        elif not HYPERLIQUID_API_KEY or not HYPERLIQUID_PRIVATE_KEY:
             logger.error('❌ Hyperliquid credentials not configured')
             self.authenticated = False
         else:

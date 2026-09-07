@@ -12,6 +12,8 @@ import requests
 from dotenv import load_dotenv
 from functools import lru_cache
 
+from skills.execution_gate import require_exchange_mutations_enabled
+
 _BASE = "https://api.hyperliquid.xyz/info"
 _TIMEOUT = 10
 
@@ -238,6 +240,7 @@ def set_leverage(coin: str, leverage: int, is_cross: bool = True) -> dict:
     Set leverage for a coin. is_cross=True for cross-margin, False for isolated.
     Returns raw SDK response.
     """
+    require_exchange_mutations_enabled()
     return _exchange().update_leverage(leverage, coin, is_cross=is_cross)
 
 
@@ -249,6 +252,7 @@ def place_market_order(coin: str, is_buy: bool, sz_usd: float,
     slippage: max acceptable slippage fraction (default 5%).
     Returns: {status, oid, coin, side, size, filled_px} or {status, error}
     """
+    require_exchange_mutations_enabled()
     sz = _sz_from_usd(coin, sz_usd)
     result = _exchange().market_open(coin, is_buy, sz, slippage=slippage)
     return _parse_order_result(result, coin, "buy" if is_buy else "sell", sz)
@@ -261,6 +265,7 @@ def place_limit_order(coin: str, is_buy: bool, sz_usd: float,
     sz_usd: notional in USD.
     Returns: {status, oid, coin, side, size, limit_px} or {status, error}
     """
+    require_exchange_mutations_enabled()
     from hyperliquid.utils.signing import OrderType
     sz = _sz_from_usd(coin, sz_usd)
     order_type: OrderType = {"limit": {"tif": "Gtc"}}
@@ -275,12 +280,14 @@ def close_position(coin: str, slippage: float = 0.05) -> dict:
     Market-close the full position for a coin.
     Returns: {status, oid, coin, side, size, filled_px} or {status, error}
     """
+    require_exchange_mutations_enabled()
     result = _exchange().market_close(coin, slippage=slippage)
     return _parse_order_result(result, coin, side=None, sz=None)
 
 
 def cancel_order(coin: str, oid: int) -> dict:
     """Cancel a single open order by order ID."""
+    require_exchange_mutations_enabled()
     result = _exchange().cancel(coin, oid)
     if result.get("status") == "ok":
         return {"status": "ok", "cancelled_oid": oid, "coin": coin}
@@ -292,6 +299,7 @@ def cancel_all_orders(coin: str | None = None) -> dict:
     Cancel all open orders, optionally filtered to a single coin.
     Returns {status, cancelled_count}.
     """
+    require_exchange_mutations_enabled()
     orders = get_open_orders()
     if coin:
         orders = [o for o in orders if o["coin"] == coin]
