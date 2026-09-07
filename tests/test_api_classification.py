@@ -26,6 +26,9 @@ class TestApiClassification(unittest.TestCase):
             "crypto market",
             "BTC funding",
             "HYPE perp setup",
+            "setup",
+            "setups",
+            "show me setups",
         )
 
         for message in cases:

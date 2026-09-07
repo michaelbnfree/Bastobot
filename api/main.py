@@ -22,7 +22,7 @@ EXPLICIT_FINANCIAL_PATTERNS = [
     r"\b(btc|eth|sol|hype|xrp|bnb|doge|sui|near|avax|usdc|usdt)\b",
 
     # Crypto/trading-specific language
-    r"\b(crypto|chart|long|short|leverage|funding|liquidation|perp|perps|futures|rsi|macd|support|resistance)\b",
+    r"\b(crypto|chart|long|short|leverage|funding|liquidation|perp|perps|futures|rsi|macd|support|resistance|setup|setups)\b",
 
     # Contextual market phrases only; avoid casual phrases like "farmers market"
     r"\b(crypto market|market structure|market update|market scan|market setup)\b",
