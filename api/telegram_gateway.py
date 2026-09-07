@@ -11,29 +11,54 @@ import base64
 import io
 import redis
 from PIL import Image
+from dotenv import load_dotenv
 
 sys.path.insert(0, '/root/bastobot')
+load_dotenv('/root/bastobot/.env')
 
 telebot.apihelper.READ_TIMEOUT = 90
 
 _redis = redis.Redis(host='localhost', port=6379, db=0)
 
 
-def _ack_message(category):
-    """Return the right acknowledgment based on rolling average job time for this category."""
+def _ack_message(prompt, category):
+    """Return acknowledgment based on category and prompt content.
+
+    Three tiers:
+    1. Snapshots/trade setups → explicit "give me a few minutes" warning
+    2. Financial API calls → rolling average time estimate (warn if > 30s)
+    3. Non-financial quick queries → no message (typing dots only)
+    """
+    slow_keywords = ["snapshot", "breakdown", "overview", "trade idea", "trade update", "trade setup"]
+
     try:
-        from workers.tasks import get_avg_timing
-        avg = get_avg_timing(category)
-        if avg is not None and avg > 30:
-            return f"⏳ Give me a couple minutes... ({category})"
-        if avg is not None and avg > 8:
-            return f"⏳ On it... (~{int(avg)}s, {category})"
+        # Tier 1: Snapshots/trade setups (explicit warning)
+        if category == "financial" and any(w in prompt.lower() for w in slow_keywords):
+            return "⏳ Give me a few minutes (financial - verified snapshot)..."
+
+        # Tier 2: Financial API calls (show rolling average, warn if slow)
+        if category == "financial":
+            from workers.tasks import get_avg_timing
+            avg = get_avg_timing(category)
+            if avg is not None:
+                if avg > 30:  # If averaging > 30s, warn
+                    return f"⏳ Give me a few minutes (financial)..."
+                elif avg > 5:  # If 5-30s, show estimate
+                    return f"⏳ On it... (~{int(avg)}s, financial)"
+            return None  # No message for very fast financial queries
+
+        # Tier 3: Non-financial (no message, typing indicator is enough)
+        return None
+
     except Exception:
-        pass
-    return f"⏳ On it... ({category})"
+        return None  # Default to no message on error
 
 
-TOKEN = "***REDACTED_TELEGRAM_TOKEN***"
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    print("ERROR: TELEGRAM_BOT_TOKEN not set in environment")
+    sys.exit(1)
+
 AUTHORIZED_ID = 298886049
 API_BASE = "http://127.0.0.1:18790"
 bot = telebot.TeleBot(TOKEN)
@@ -47,21 +72,63 @@ def _send_long(chat_id, text, chunk_size=4000):
         bot.send_message(chat_id, text[i:i + chunk_size])
 
 
-def poll_and_reply(job_id, chat_id):
-    for _ in range(120):  # 10 min at 5s intervals
-        time.sleep(5)
+def keep_typing(chat_id, stop_event):
+    """Send typing action immediately and every 4 seconds until stop_event is set."""
+    try:
+        result = bot.send_chat_action(chat_id, "typing")
+        print(f"[TYPING] Sent initial typing indicator for {chat_id}, result={result}")
+    except Exception as e:
+        print(f"[TYPING] Failed to send initial: {e}")
+
+    while not stop_event.is_set():
+        # Wait 4 seconds or wake up early if stop_event is triggered
+        if stop_event.wait(timeout=4.0):
+            break
         try:
-            res = requests.get(f"{API_BASE}/result/{job_id}", timeout=5)
-            data = res.json()
-            if data.get("status") == "complete":
-                _send_long(chat_id, data["response"])
-                return
-            if data.get("status") in ("failed", "error"):
-                bot.send_message(chat_id, f"❌ Job failed: {data.get('message', 'unknown error')}")
-                return
-        except Exception:
-            pass
-    bot.send_message(chat_id, "⏱ Request timed out.")
+            result = bot.send_chat_action(chat_id, "typing")
+            print(f"[TYPING] Refreshed typing indicator for {chat_id}, result={result}")
+        except Exception as e:
+            print(f"[TYPING] Failed to refresh: {e}")
+
+
+def poll_and_reply(job_id, chat_id):
+    stop_typing_event = threading.Event()
+
+    # Start typing indicator in background
+    typing_thread = threading.Thread(
+        target=keep_typing,
+        args=(chat_id, stop_typing_event),
+        daemon=True
+    )
+    typing_thread.start()
+    print(f"[POLL] Started typing thread for job {job_id} in chat {chat_id}")
+
+    try:
+        for _ in range(120):  # 10 min at 5s intervals
+            time.sleep(5)
+            try:
+                res = requests.get(f"{API_BASE}/result/{job_id}", timeout=5)
+                data = res.json()
+                if data.get("status") == "complete":
+                    stop_typing_event.set()
+                    typing_thread.join(timeout=1)
+                    _send_long(chat_id, data["response"])
+                    return
+                if data.get("status") in ("failed", "error"):
+                    stop_typing_event.set()
+                    typing_thread.join(timeout=1)
+                    bot.send_message(chat_id, f"❌ Job failed: {data.get('message', 'unknown error')}")
+                    return
+            except Exception:
+                pass
+
+        # Timeout reached
+        stop_typing_event.set()
+        typing_thread.join(timeout=1)
+        bot.send_message(chat_id, "⏱ Request timed out.")
+    finally:
+        stop_typing_event.set()
+        typing_thread.join(timeout=1)
 
 
 @bot.message_handler(commands=['start'])
@@ -126,7 +193,9 @@ def handle_photo(message):
             timeout=15
         )
         data = res.json()
-        bot.reply_to(message, _ack_message(data.get('category', 'vision')))
+        ack = _ack_message(message.caption or "", data.get('category', 'vision'))
+        if ack:
+            bot.reply_to(message, ack)
         threading.Thread(
             target=poll_and_reply,
             args=(data["job_id"], message.chat.id),
@@ -140,16 +209,20 @@ def handle_photo(message):
 def handle_kill(message):
     if message.from_user.id != AUTHORIZED_ID:
         return
-    from skills.active.hyperliquid import set_kill_switch
-    bot.reply_to(message, set_kill_switch(True))
+    bot.reply_to(
+        message,
+        "Exchange kill-switch control is handled by the canonical Barry engine, not BastoBot."
+    )
 
 
 @bot.message_handler(commands=['resume'])
 def handle_resume(message):
     if message.from_user.id != AUTHORIZED_ID:
         return
-    from skills.active.hyperliquid import set_kill_switch
-    bot.reply_to(message, set_kill_switch(False))
+    bot.reply_to(
+        message,
+        "Exchange resume control is handled by the canonical Barry engine, not BastoBot."
+    )
 
 
 @bot.message_handler(commands=['approve'])
@@ -190,17 +263,10 @@ def handle_reject(message):
 def handle_riskstatus(message):
     if message.from_user.id != AUTHORIZED_ID:
         return
-    from skills.active.hyperliquid import get_risk_status
-    s = get_risk_status()
-    lines = [
-        f"{'🛑' if s['kill_switch'] else '✅'} Kill switch: {'ON' if s['kill_switch'] else 'off'}",
-        f"{'🔐' if s['manual_confirm'] else '🤖'} Manual confirm: {'ON' if s['manual_confirm'] else 'off'}",
-        f"💰 Max trade: ${s['max_trade_usd']:,.0f}",
-        f"📉 Daily loss limit: ${s['daily_loss_limit']:,.0f}",
-        f"📊 Today's loss: ${s['today_loss_usd']:,.2f}" if s['today_loss_usd'] is not None else "📊 Today's loss: (no baseline yet)",
-        f"🏦 Current equity: ${s['current_equity']:,.2f}" if s['current_equity'] is not None else "🏦 Current equity: unavailable",
-    ]
-    bot.reply_to(message, "\n".join(lines))
+    bot.reply_to(
+        message,
+        "Risk status is owned by the canonical Barry engine. BastoBot is limited to UI, research, and proposal emission."
+    )
 
 
 @bot.message_handler(func=lambda m: True)
@@ -213,12 +279,16 @@ def handle_message(message):
         if data.get("category") == "simple":
             bot.reply_to(message, data["response"])
         else:
-            bot.reply_to(message, _ack_message(data.get('category', 'queued')))
+            # Start typing indicator immediately, then send ack
             threading.Thread(
                 target=poll_and_reply,
                 args=(data["job_id"], message.chat.id),
                 daemon=True
             ).start()
+            time.sleep(0.5)  # Give typing thread a moment to start
+            ack = _ack_message(message.text, data.get('category', 'queued'))
+            if ack:
+                bot.reply_to(message, ack)
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
@@ -244,6 +314,8 @@ threading.Thread(target=_watchdog, daemon=True).start()
 try:
     bot.delete_webhook()
     print("[STARTUP] Webhook cleared.")
+    import time
+    time.sleep(1)  # Wait for webhook to be deleted
 except Exception as e:
     print(f"[STARTUP] delete_webhook failed: {e}")
 
