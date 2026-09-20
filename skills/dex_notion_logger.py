@@ -67,7 +67,6 @@ def log_arbitrage_opportunity(
             "Volume 24h": {"number": int(volume_24h)},
             "Status": {"select": {"name": status}},
             "Direction": {"select": {"name": "SELL on DEX" if spread_pct > 0 else "BUY on DEX"}},
-            "Timestamp": {"rich_text": [{"text": {"content": now.isoformat()}}]},
         }
 
         if notes:
@@ -88,6 +87,10 @@ def log_arbitrage_opportunity(
         print(f"[NOTION] Logged {symbol} {spread_pct:+.2f}% on {dex}")
         return True
 
+    except requests.HTTPError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        print(f"[NOTION] Log failed: {detail}")
+        return False
     except Exception as e:
         print(f"[NOTION] Log failed: {e}")
         return False
