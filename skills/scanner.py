@@ -4,8 +4,6 @@ Fetches data for all watched assets, stores in Redis,
 and fires Telegram alerts when alert conditions are met with cooldowns.
 """
 
-import os
-import re
 import sys
 import json
 import time
@@ -23,46 +21,12 @@ _FETCH_SLEEP = 8   # seconds between asset fetches to avoid TV 429s
 _ALERT_KEY = "scanner:alert:{symbol}:{condition}"
 _PREV_PRICE_KEY = "scanner:prev_price:{symbol}"
 
-# Telegram outbound (same bot, same authorized user as the gateway)
-_TG_CHAT  = 298886049
-_TG_TOKEN_FORMAT = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
-
-
-def _telegram_token() -> str:
-    """The gateway bot token from TELEGRAM_BOT_TOKEN (loaded from .env by the service).
-
-    A placeholder such as "***REDACTED_TELEGRAM_TOKEN***" was committed here once and
-    every alert silently got a Telegram 404, so the format is checked as well.
-    """
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    if not _TG_TOKEN_FORMAT.fullmatch(token):
-        raise ValueError(
-            "FATAL: TELEGRAM_BOT_TOKEN is missing or not a bot token.\n"
-            "Set it in /root/bastobot/.env (the same token the Telegram gateway uses)."
-        )
-    return token
-
-
-def require_telegram_config() -> None:
-    """Fail fast at service start instead of silently dropping every alert."""
-    _telegram_token()
+# Telegram outbound: shared helper (same bot, same authorized user as the gateway)
+from skills.telegram_alert import require_telegram_config, send_telegram  # noqa: E402,F401
 
 
 def send_alert(text: str) -> bool:
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{_telegram_token()}/sendMessage",
-            json={"chat_id": _TG_CHAT, "text": text, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-        if not resp.ok:
-            print(f"[ALERT] FAILED: Telegram HTTP {resp.status_code}: {resp.text[:200]}")
-            return False
-        print(f"[ALERT] Sent: {text[:60]}")
-        return True
-    except Exception as e:
-        print(f"[ALERT] TG failed: {e}")
-        return False
+    return send_telegram(text, label="ALERT")
 
 
 def _cooldown(symbol: str, condition: str, ttl: int) -> bool:

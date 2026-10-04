@@ -15,9 +15,6 @@ _TV_USER_DAILY_LIMIT = 4  # User-requested calls per day
 _TV_FALLBACK_HOURLY_LIMIT = 15  # Automatic fallback per hour (circuit breaker if exceeded)
 _TV_FALLBACK_CIRCUIT_THRESHOLD = 10  # Consecutive fallbacks → alert (local is broken)
 
-_TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-_TG_CHAT = int(os.getenv("TELEGRAM_CHAT_ID", 0))
-
 _INTERVAL_MAP = {
     "5m":  Interval.INTERVAL_5_MINUTES,
     "15m": Interval.INTERVAL_15_MINUTES,
@@ -147,18 +144,10 @@ def _get_local_indicators(symbol, candles=None):
     return results if results else None
 
 
-def _send_telegram_alert(text: str) -> None:
+def _send_telegram_alert(text: str) -> bool:
     """Send Telegram alert for rate limit hits."""
-    if not _TG_TOKEN or not _TG_CHAT:
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage",
-            json={"chat_id": _TG_CHAT, "text": text, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"[TG-ALERT] Failed to send: {e}")
+    from skills.telegram_alert import send_telegram
+    return send_telegram(text, label="TG-ALERT")
 
 
 def _check_tv_user_request_limit(symbol: str, user_id: str = "manual") -> tuple[bool, int]:

@@ -3,11 +3,12 @@
 # Notifies once per pending reboot; the marker lives in /var/run/ so it
 # clears automatically after the reboot happens.
 
-TOKEN="***REDACTED_TELEGRAM_TOKEN***"
-CHAT_ID="298886049"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/telegram_env.sh"
+load_telegram_token || exit 1
 
-REBOOT_FLAG="/var/run/reboot-required"
-NOTIFIED_MARKER="/var/run/barry-reboot-required-notified"
+REBOOT_FLAG="${REBOOT_FLAG:-/var/run/reboot-required}"
+NOTIFIED_MARKER="${NOTIFIED_MARKER:-/var/run/barry-reboot-required-notified}"
 
 [ -f "$REBOOT_FLAG" ] || exit 0
 [ -f "$NOTIFIED_MARKER" ] && exit 0
@@ -27,10 +28,7 @@ else
 Run reboot at your next maintenance window."
 fi
 
-curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${CHAT_ID}" \
-    --data-urlencode "text=${MESSAGE}" \
-    > /dev/null 2>&1
+send_telegram "$MESSAGE" || exit 1
 
 touch "$NOTIFIED_MARKER"
 exit 0

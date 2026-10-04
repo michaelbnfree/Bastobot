@@ -2,12 +2,13 @@
 # Daily disk space check — alerts via Telegram when usage crosses threshold.
 # Uses a /var/run marker to avoid repeated alerts at the same usage level.
 
-TOKEN="***REDACTED_TELEGRAM_TOKEN***"
-CHAT_ID="298886049"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/telegram_env.sh"
+load_telegram_token || exit 1
 
-THRESHOLD=75
+THRESHOLD="${THRESHOLD:-75}"
 CRITICAL=90
-NOTIFIED_MARKER="/var/run/barry-disk-alert-notified"
+NOTIFIED_MARKER="${NOTIFIED_MARKER:-/var/run/barry-disk-alert-notified}"
 
 DISK_PCT=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
 
@@ -35,10 +36,7 @@ MESSAGE="${ICON} Disk ${LABEL} on bastobot (${TIMESTAMP}).
 Usage: ${DISK_PCT}% (${DISK_USED} of ${DISK_TOTAL} used, ${DISK_AVAIL} free)
 Consider: docker system prune -f or clearing old logs."
 
-curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${CHAT_ID}" \
-    --data-urlencode "text=${MESSAGE}" \
-    > /dev/null 2>&1
+send_telegram "$MESSAGE" || exit 1
 
 touch "$NOTIFIED_MARKER"
 exit 0

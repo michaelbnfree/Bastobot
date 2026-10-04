@@ -2,8 +2,9 @@
 # Barry health check — run after boot (barry-health-check.service) or manually.
 # Sends a Telegram summary and prints to stdout.
 
-TOKEN="***REDACTED_TELEGRAM_TOKEN***"
-CHAT_ID="298886049"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/telegram_env.sh"
+load_telegram_token || exit 1
 
 TIMESTAMP=$(date -u '+%b %d, %Y %H:%M UTC')
 NOW_EPOCH=$(date +%s)
@@ -133,9 +134,6 @@ MESSAGE=$(printf "%s\n\n%b" "$HEADER" "$BODY")
 
 printf "%s\n" "$MESSAGE"
 
-curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${CHAT_ID}" \
-    --data-urlencode "text=${MESSAGE}" \
-    > /dev/null 2>&1
+send_telegram "$MESSAGE" || exit 1
 
 exit 0

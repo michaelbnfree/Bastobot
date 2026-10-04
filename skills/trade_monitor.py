@@ -25,9 +25,6 @@ NOTION_API_KEY      = os.getenv("NOTION_API_KEY")
 NOTION_VERSION      = "2022-06-28"
 TRADE_MONITOR_DB_ID = os.getenv("NOTION_TRADE_MONITOR_DB_ID", "")
 
-_TG_TOKEN = "***REDACTED_TELEGRAM_TOKEN***"
-_TG_CHAT  = 298886049
-
 _HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
     "Content-Type":  "application/json",
@@ -35,15 +32,9 @@ _HEADERS = {
 }
 
 
-def _send_tg(text: str) -> None:
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage",
-            json={"chat_id": _TG_CHAT, "text": text, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"[TRADE MON] TG failed: {e}")
+def _send_tg(text: str) -> bool:
+    from skills.telegram_alert import send_telegram
+    return send_telegram(text, label="TRADE MON")
 
 
 def _log_to_notion(trade: dict) -> tuple[str | None, str | None]:
