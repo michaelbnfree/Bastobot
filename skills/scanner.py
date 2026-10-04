@@ -331,6 +331,16 @@ def check_alerts(symbol: str, data: dict) -> list[str]:
     return fired
 
 
+def _publish_scan_regimes(results: dict[str, dict]) -> None:
+    """Refresh the 1h/4h regime keys from this cycle's TA (at most ~15 min old)."""
+    from skills.snapshot_logger import publish_ta_regime
+    for symbol, data in results.items():
+        try:
+            publish_ta_regime(symbol, data)
+        except Exception as e:
+            print(f"[SCANNER] regime publish for {symbol} failed: {e}")
+
+
 def scan_all() -> dict[str, dict]:
     """
     Fetch + cache + alert for all watched symbols. Returns {symbol: data}.
@@ -367,6 +377,8 @@ def scan_all() -> dict[str, dict]:
         data = fetch_and_cache(symbol)
         if data:
             results[symbol] = data
+
+    _publish_scan_regimes(results)
 
     # Run alert checks on all results
     for symbol, data in results.items():

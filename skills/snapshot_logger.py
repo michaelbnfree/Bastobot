@@ -555,15 +555,64 @@ def _ta_to_regime(rec: str) -> str:
     if "SELL" in u: return "BEAR"
     return "CRAB"
 
-_REGIME_TTL_SECONDS = 14400   # 4h
+_REGIME_TTL_SECONDS = 14400   # 4h: overall bias + meta (published from the session snapshot)
+_REGIME_TF_TTL_SECONDS = 3600  # 1h: the 1h/4h TA regimes, refreshed every scan cycle; if the
+                               # data stops they fade out on their own instead of going stale
+
+
+def _tf_regime(ta: dict, timeframe: str) -> str | None:
+    """BULL/BEAR/CRAB for one timeframe, or None when TA has no recommendation for it.
+
+    A failed TradingView fetch for a timeframe must not be published as "CRAB"
+    (sideways); consumers treat a missing key as no data."""
+    recommendation = ((ta.get(timeframe) or {}).get("summary") or {}).get("RECOMMENDATION")
+    return _ta_to_regime(recommendation) if recommendation else None
+
+
+def publish_ta_regime(asset: str, data: dict) -> bool:
+    """Publish the 1h/4h regimes from one scan's TA. Called every scan cycle.
+
+    Per-asset keys for every asset; only BTC writes the shared market:regime:1h/4h
+    keys. Timeframes with no TA are skipped. Returns True if anything was written."""
+    ta = data.get("ta") or {}
+    r_1h, r_4h = _tf_regime(ta, "1h"), _tf_regime(ta, "4h")
+    if r_1h is None and r_4h is None:
+        return False
+    asset_key = (asset or "BTC").upper()
+    meta = {
+        "regime_1h":  r_1h,
+        "regime_4h":  r_4h,
+        "asset":      asset_key,
+        "price":      (data.get("binance") or {}).get("price"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "source":     "scan",
+    }
+    writes = [("market:regime_ta_meta", f"market:regime_ta_meta:{asset_key}", json.dumps(meta))]
+    for suffix, value in ((":1h", r_1h), (":4h", r_4h)):
+        if value is not None:
+            writes.append((f"market:regime{suffix}", f"market:regime:{asset_key}{suffix}", value))
+    try:
+        r = _get_redis()
+        previous = r.get(f"market:regime_ta_meta:{asset_key}")
+        for shared_key, asset_specific_key, value in writes:
+            r.setex(asset_specific_key, _REGIME_TF_TTL_SECONDS, value)
+            if asset_key == "BTC":
+                r.setex(shared_key, _REGIME_TF_TTL_SECONDS, value)
+        old = json.loads(previous) if previous else {}
+        if (old.get("regime_1h"), old.get("regime_4h")) != (r_1h, r_4h):
+            print(f"[REGIME] scan {asset_key}: 1h={r_1h} 4h={r_4h}")
+        return True
+    except Exception as e:
+        print(f"[REGIME] scan publish failed for {asset_key}: {e}")
+        return False
 
 
 def _publish_regime(bias: str, data: dict, asset: str = "BTC") -> None:
     regime = _BIAS_TO_REGIME.get(bias, "CRAB")
 
     ta   = data.get("ta", {})
-    r_1h = _ta_to_regime(ta.get("1h", {}).get("summary", {}).get("RECOMMENDATION", ""))
-    r_4h = _ta_to_regime(ta.get("4h", {}).get("summary", {}).get("RECOMMENDATION", ""))
+    r_1h = _tf_regime(ta, "1h")
+    r_4h = _tf_regime(ta, "4h")
 
     meta = {
         "regime":     regime,
@@ -577,17 +626,18 @@ def _publish_regime(bias: str, data: dict, asset: str = "BTC") -> None:
     try:
         r = _get_redis()
         asset_key = (asset or "BTC").upper()
-        # (shared key read by Barry's paper traders, per-asset key, value)
-        keys = (
-            ("market:regime", f"market:regime:{asset_key}", regime),
-            ("market:regime:1h", f"market:regime:{asset_key}:1h", r_1h),
-            ("market:regime:4h", f"market:regime:{asset_key}:4h", r_4h),
-            ("market:regime_meta", f"market:regime_meta:{asset_key}", json.dumps(meta)),
-        )
-        for shared_key, asset_specific_key, value in keys:
-            r.setex(asset_specific_key, _REGIME_TTL_SECONDS, value)
+        # (shared key read by Barry's paper traders, per-asset key, value, ttl)
+        keys = [
+            ("market:regime", f"market:regime:{asset_key}", regime, _REGIME_TTL_SECONDS),
+            ("market:regime_meta", f"market:regime_meta:{asset_key}", json.dumps(meta), _REGIME_TTL_SECONDS),
+        ]
+        for suffix, value in ((":1h", r_1h), (":4h", r_4h)):
+            if value is not None:   # no TA for that timeframe: publish nothing, not "CRAB"
+                keys.append((f"market:regime{suffix}", f"market:regime:{asset_key}{suffix}", value, _REGIME_TF_TTL_SECONDS))
+        for shared_key, asset_specific_key, value, ttl in keys:
+            r.setex(asset_specific_key, ttl, value)
             if asset_key == "BTC":  # ETH etc. must not overwrite BTC's shared keys
-                r.setex(shared_key, _REGIME_TTL_SECONDS, value)
+                r.setex(shared_key, ttl, value)
         print(f"[REGIME] Published overall={regime} 1h={r_1h} 4h={r_4h} (bias={bias}, asset={asset})")
     except Exception as e:
         print(f"[REGIME] Redis write failed: {e}")
