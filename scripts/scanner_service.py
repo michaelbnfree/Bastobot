@@ -190,6 +190,8 @@ def _clear_stale_cache() -> None:
 
 def main() -> None:
     print("[SCANNER] BastoBot scanner service starting...")
+    from skills.scanner import require_telegram_config
+    require_telegram_config()  # exit loudly now rather than drop every alert later
     _clear_stale_cache()
     time.sleep(1)  # Brief pause before first scan
     while True:
