@@ -60,7 +60,12 @@ CHAIN_IDS = {
 
 # A DEX pair priced further than this from the CEX price is a different asset
 # (scam or depegged token sharing the symbol), not an arbitrage opportunity.
-MAX_DEX_CEX_DEVIATION_PCT = 25.0
+MAX_DEX_CEX_DEVIATION_PCT = 10.0
+
+# Chains where a bare-symbol search for these assets only finds bridged or wrapped
+# look-alikes (e.g. Raydium "BTC"/"ETH" at a standing 2-12% discount with inflated
+# liquidity), never a price that can be arbitraged against the CEX.
+UNRELIABLE_CHAINS = {"BTC": {"solana"}, "ETH": {"solana"}}
 
 
 def _within_deviation(price, reference_price: float) -> bool:
@@ -144,6 +149,8 @@ class DexScreenerClient:
         result = {}
 
         for chain in chains:
+            if chain in UNRELIABLE_CHAINS.get(symbol.upper(), ()):
+                continue
             try:
                 pair = self._search_token(symbol, chain, reference_price)
                 if not pair:

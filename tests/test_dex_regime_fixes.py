@@ -44,6 +44,11 @@ class TestLookAlikeRejection(unittest.TestCase):
         client = client_with([pair(62362.73, liquidity=22_000_000)])
         self.assertIsNone(client.compare_dex_cex_prices("BTC", CEX)["dex_best"])
 
+    def test_bridged_eth_12_percent_off_is_rejected(self):
+        """Raydium ETH/USDC sat ~12% under the CEX with an implausible $477M of liquidity."""
+        client = client_with([pair(2383.23, liquidity=476_618_056, dex="raydium", symbol="ETH")])
+        self.assertIsNone(client.compare_dex_cex_prices("ETH", 2706.0)["dex_best"])
+
     def test_real_pair_is_found_behind_a_fake_first_result(self):
         client = client_with([pair(0.0012, liquidity=6_000_000_000), pair(85400.0)])
         best = client.compare_dex_cex_prices("BTC", CEX)["dex_best"]
@@ -59,10 +64,36 @@ class TestLookAlikeRejection(unittest.TestCase):
         self.assertEqual(client._search_token("BTC", "ethereum")["priceUsd"], "0.0012")
 
     def test_deviation_helper_edges(self):
-        self.assertTrue(dexscreener_client._within_deviation("106250", CEX))   # +25.0%
-        self.assertFalse(dexscreener_client._within_deviation("106260", CEX))
+        self.assertTrue(dexscreener_client._within_deviation("93500", CEX))    # +10.0%
+        self.assertFalse(dexscreener_client._within_deviation("93510", CEX))
+        self.assertTrue(dexscreener_client._within_deviation("76500", CEX))    # -10.0%
+        self.assertFalse(dexscreener_client._within_deviation("76490", CEX))
         self.assertFalse(dexscreener_client._within_deviation(None, CEX))
         self.assertFalse(dexscreener_client._within_deviation("0", CEX))
+
+
+class TestSolanaIgnoredForBtcAndEth(unittest.TestCase):
+    """Raydium BTC/ETH are bridged look-alikes; a 1.7% 'arb' there is a standing discount."""
+
+    def test_solana_btc_pair_inside_the_band_is_still_ignored(self):
+        client = client_with([pair(83937.95, liquidity=839_000_000, dex="raydium", chain="solana")])
+        comparison = client.compare_dex_cex_prices("BTC", CEX)
+        self.assertIsNone(comparison["dex_best"])
+        self.assertEqual(comparison["arbitrage_pct"], 0)
+        self.assertNotIn("solana", comparison["all_dex_prices"])
+
+    def test_solana_eth_is_ignored_case_insensitively(self):
+        client = client_with([pair(2700.0, dex="raydium", chain="solana", symbol="ETH")])
+        self.assertEqual(client.get_dex_prices("eth", reference_price=2706.0), {})
+
+    def test_other_chains_still_work_for_btc_and_eth(self):
+        client = client_with([pair(85400.0, chain="ethereum")])
+        self.assertEqual(client.compare_dex_cex_prices("BTC", CEX)["dex_best"]["chain"], "ethereum")
+
+    def test_solana_is_still_used_for_other_symbols(self):
+        client = client_with([pair(150.0, dex="raydium", chain="solana", symbol="SOL")])
+        best = client.compare_dex_cex_prices("SOL", 150.5)["dex_best"]
+        self.assertEqual(best["chain"], "solana")
 
 
 class TestNotionCooldown(unittest.TestCase):
