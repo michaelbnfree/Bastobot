@@ -57,13 +57,36 @@ CHAIN_IDS = {
 }
 
 
+
+# A DEX pair priced further than this from the CEX price is a different asset
+# (scam or depegged token sharing the symbol), not an arbitrage opportunity.
+MAX_DEX_CEX_DEVIATION_PCT = 25.0
+
+
+def _within_deviation(price, reference_price: float) -> bool:
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0 or not reference_price:
+        return False
+    return abs(price - reference_price) / reference_price * 100 <= MAX_DEX_CEX_DEVIATION_PCT
+
+
 class DexScreenerClient:
     def __init__(self):
         self.session = requests.Session()
         self.session.timeout = TIMEOUT
 
-    def _search_token(self, symbol: str, chain: str = "ethereum") -> Optional[dict]:
-        """Search for a token by symbol. Returns first matching pair."""
+    def _search_token(
+        self, symbol: str, chain: str = "ethereum", reference_price: Optional[float] = None
+    ) -> Optional[dict]:
+        """Search for a token by symbol. Returns first matching pair.
+
+        The search matches any token carrying that symbol, including scam and
+        depegged tokens. When reference_price (the CEX price) is given, only a
+        pair priced within MAX_DEX_CEX_DEVIATION_PCT of it is accepted.
+        """
         try:
             resp = self.session.get(
                 f"{BASE_URL}/dex/search",
@@ -77,6 +100,9 @@ class DexScreenerClient:
             # Filter to requested chain if specified
             if chain and pairs:
                 pairs = [p for p in pairs if p.get("chainId") == CHAIN_IDS.get(chain, chain)]
+
+            if reference_price:
+                pairs = [p for p in pairs if _within_deviation(p.get("priceUsd"), reference_price)]
 
             if pairs:
                 return pairs[0]  # Return highest liquidity match
@@ -101,10 +127,16 @@ class DexScreenerClient:
             print(f"[DEX] get_pair({chain}/{pair_address}) failed: {e}")
             return None
 
-    def get_dex_prices(self, symbol: str, chains: Optional[list[str]] = None) -> dict:
+    def get_dex_prices(
+        self,
+        symbol: str,
+        chains: Optional[list[str]] = None,
+        reference_price: Optional[float] = None,
+    ) -> dict:
         """
         Get DEX prices for a token across multiple chains.
         Returns: {chain: {dex: price, liquidity, volume_24h, ...}}
+        reference_price: CEX price used to reject look-alike tokens (see _search_token).
         """
         if chains is None:
             chains = list(CHAIN_IDS.keys())
@@ -113,7 +145,7 @@ class DexScreenerClient:
 
         for chain in chains:
             try:
-                pair = self._search_token(symbol, chain)
+                pair = self._search_token(symbol, chain, reference_price)
                 if not pair:
                     continue
 
@@ -176,7 +208,7 @@ class DexScreenerClient:
         Compare CEX price against DEX prices.
         Returns arbitrage opportunities if price divergence > threshold.
         """
-        dex_data = self.get_dex_prices(symbol)
+        dex_data = self.get_dex_prices(symbol, reference_price=cex_price)
 
         comparison = {
             "symbol": symbol,

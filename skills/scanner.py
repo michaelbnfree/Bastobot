@@ -130,6 +130,64 @@ def get_or_fetch(symbol: str, candles: tuple = ("1h", "4h", "1d")) -> dict | Non
     return data if data is not None else fetch_and_cache(symbol, candles=candles)
 
 
+def _check_dex_arbitrage(symbol: str, price: float, data: dict) -> list[str]:
+    """Log the CEX/DEX comparison and alert on a meaningful spread.
+
+    Notion and Telegram each get at most one entry per symbol per hour; the
+    Redis monitor still records every cycle.
+    """
+    fired: list[str] = []
+    from skills.dex_monitor import log_opportunity
+    from skills.dex_notion_logger import log_arbitrage_opportunity
+    dex_comp = data.get("dex_comparison", {})
+    if dex_comp and dex_comp.get("dex_best"):
+        arb_pct = dex_comp.get("arbitrage_pct", 0)
+        dex_best = dex_comp["dex_best"]
+        liquidity = dex_best.get("liquidity", 0)
+        volume_24h = dex_comp.get("all_dex_prices", {}).get(dex_best["chain"], {}).get(dex_best["dex"], {}).get("volume_24h", 0)
+
+        # Log all opportunities for monitoring (even below-threshold ones)
+        is_alert_worthy = abs(arb_pct) >= 1.0 and liquidity >= 500000
+        log_opportunity(
+            symbol=symbol,
+            chain=dex_best["chain"],
+            dex=dex_best["dex"],
+            spread_pct=arb_pct,
+            dex_price=dex_best["price"],
+            cex_price=price,
+            liquidity=liquidity,
+            volume_24h=volume_24h,
+            is_alert_worthy=is_alert_worthy,
+        )
+
+        # Log high-gain opportunities to Notion for 3-month dataset
+        if is_alert_worthy and not _cooldown(symbol, "dex_notion_log", 3600):
+            log_arbitrage_opportunity(
+                symbol=symbol,
+                chain=dex_best["chain"],
+                dex=dex_best["dex"],
+                spread_pct=arb_pct,
+                dex_price=dex_best["price"],
+                cex_price=price,
+                liquidity=liquidity,
+                volume_24h=volume_24h,
+            )
+
+        # Only alert on meaningful opportunities: 1%+ spread + sufficient liquidity
+        if is_alert_worthy and not _cooldown(symbol, "dex_cex_arbitrage", 3600):
+            direction = "SELL on DEX" if arb_pct > 0 else "BUY on DEX"
+            arrow = "📊" if abs(arb_pct) < 2 else "🚀"
+            send_alert(
+                f"{arrow} *{symbol} CEX/DEX Arbitrage*\n"
+                f"Spread: {arb_pct:+.2f}% — {direction}\n"
+                f"CEX (Binance): ${price:,.2f}\n"
+                f"DEX ({dex_best['dex']} on {dex_best['chain']}): ${dex_best['price']:,.2f}\n"
+                f"Liquidity: ${liquidity:,.0f}"
+            )
+            fired.append("dex_cex_arbitrage")
+    return fired
+
+
 def check_alerts(symbol: str, data: dict) -> list[str]:
     """Evaluate all alert conditions. Returns list of condition names that fired."""
     from skills.conviction import score as conv_score
@@ -277,54 +335,7 @@ def check_alerts(symbol: str, data: dict) -> list[str]:
             fired.append("chain_leader_move")
 
     # ── CEX/DEX arbitrage opportunity ────────────────────────────────────────
-    from skills.dex_monitor import log_opportunity
-    from skills.dex_notion_logger import log_arbitrage_opportunity
-    dex_comp = data.get("dex_comparison", {})
-    if dex_comp and dex_comp.get("dex_best"):
-        arb_pct = dex_comp.get("arbitrage_pct", 0)
-        dex_best = dex_comp["dex_best"]
-        liquidity = dex_best.get("liquidity", 0)
-        volume_24h = dex_comp.get("all_dex_prices", {}).get(dex_best["chain"], {}).get(dex_best["dex"], {}).get("volume_24h", 0)
-
-        # Log all opportunities for monitoring (even below-threshold ones)
-        is_alert_worthy = abs(arb_pct) >= 1.0 and liquidity >= 500000
-        log_opportunity(
-            symbol=symbol,
-            chain=dex_best["chain"],
-            dex=dex_best["dex"],
-            spread_pct=arb_pct,
-            dex_price=dex_best["price"],
-            cex_price=price,
-            liquidity=liquidity,
-            volume_24h=volume_24h,
-            is_alert_worthy=is_alert_worthy,
-        )
-
-        # Log high-gain opportunities to Notion for 3-month dataset
-        if is_alert_worthy:
-            log_arbitrage_opportunity(
-                symbol=symbol,
-                chain=dex_best["chain"],
-                dex=dex_best["dex"],
-                spread_pct=arb_pct,
-                dex_price=dex_best["price"],
-                cex_price=price,
-                liquidity=liquidity,
-                volume_24h=volume_24h,
-            )
-
-        # Only alert on meaningful opportunities: 1%+ spread + sufficient liquidity
-        if is_alert_worthy and not _cooldown(symbol, "dex_cex_arbitrage", 3600):
-            direction = "SELL on DEX" if arb_pct > 0 else "BUY on DEX"
-            arrow = "📊" if abs(arb_pct) < 2 else "🚀"
-            send_alert(
-                f"{arrow} *{symbol} CEX/DEX Arbitrage*\n"
-                f"Spread: {arb_pct:+.2f}% — {direction}\n"
-                f"CEX (Binance): ${price:,.2f}\n"
-                f"DEX ({dex_best['dex']} on {dex_best['chain']}): ${dex_best['price']:,.2f}\n"
-                f"Liquidity: ${liquidity:,.0f}"
-            )
-            fired.append("dex_cex_arbitrage")
+    fired.extend(_check_dex_arbitrage(symbol, price, data))
 
     return fired
 

@@ -555,6 +555,9 @@ def _ta_to_regime(rec: str) -> str:
     if "SELL" in u: return "BEAR"
     return "CRAB"
 
+_REGIME_TTL_SECONDS = 14400   # 4h
+
+
 def _publish_regime(bias: str, data: dict, asset: str = "BTC") -> None:
     regime = _BIAS_TO_REGIME.get(bias, "CRAB")
 
@@ -573,10 +576,18 @@ def _publish_regime(bias: str, data: dict, asset: str = "BTC") -> None:
     }
     try:
         r = _get_redis()
-        r.setex("market:regime",      14400, regime)           # 4h TTL
-        r.setex("market:regime:1h",   14400, r_1h)
-        r.setex("market:regime:4h",   14400, r_4h)
-        r.setex("market:regime_meta", 14400, json.dumps(meta))
+        asset_key = (asset or "BTC").upper()
+        # (shared key read by Barry's paper traders, per-asset key, value)
+        keys = (
+            ("market:regime", f"market:regime:{asset_key}", regime),
+            ("market:regime:1h", f"market:regime:{asset_key}:1h", r_1h),
+            ("market:regime:4h", f"market:regime:{asset_key}:4h", r_4h),
+            ("market:regime_meta", f"market:regime_meta:{asset_key}", json.dumps(meta)),
+        )
+        for shared_key, asset_specific_key, value in keys:
+            r.setex(asset_specific_key, _REGIME_TTL_SECONDS, value)
+            if asset_key == "BTC":  # ETH etc. must not overwrite BTC's shared keys
+                r.setex(shared_key, _REGIME_TTL_SECONDS, value)
         print(f"[REGIME] Published overall={regime} 1h={r_1h} 4h={r_4h} (bias={bias}, asset={asset})")
     except Exception as e:
         print(f"[REGIME] Redis write failed: {e}")
