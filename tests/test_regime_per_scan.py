@@ -88,14 +88,14 @@ class TestScanPublish(unittest.TestCase):
 
 
 class TestSessionPublisherNoLongerFakesCrab(unittest.TestCase):
-    def test_session_publish_skips_a_missing_timeframe_and_keeps_the_4h_overall_ttl(self):
+    def test_session_publish_skips_a_missing_timeframe_and_keeps_the_14h_overall_ttl(self):
         fake = FakeRedis()
         with patch.object(snapshot_logger, "_get_redis", return_value=fake):
             snapshot_logger._publish_regime("Bullish", ta(rec_1h=None), "BTC")
         self.assertNotIn("market:regime:1h", fake.store)
         self.assertEqual(fake.store["market:regime:4h"][0], 3600)
-        self.assertEqual(fake.store["market:regime"], (14400, "BULL"))
-        self.assertEqual(fake.store["market:regime_meta"][0], 14400)
+        self.assertEqual(fake.store["market:regime"], (50400, "BULL"))
+        self.assertEqual(fake.store["market:regime_meta"][0], 50400)
 
 
 class TestScannerWiring(unittest.TestCase):

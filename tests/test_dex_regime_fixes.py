@@ -176,10 +176,10 @@ class TestRegimeKeys(unittest.TestCase):
             ["market:regime:ETH", "market:regime:ETH:1h", "market:regime:ETH:4h", "market:regime_meta:ETH"],
         )
 
-    def test_timeframe_keys_live_1h_and_the_overall_bias_4h(self):
+    def test_timeframe_keys_live_1h_and_the_overall_bias_14h(self):
         for asset in ("BTC", "ETH"):
             for key, (ttl, _value) in self.publish(asset).items():
-                expected = 3600 if key.endswith((":1h", ":4h")) else 4 * 3600
+                expected = 3600 if key.endswith((":1h", ":4h")) else 14 * 3600
                 self.assertEqual(ttl, expected, key)
 
     def test_asset_defaults_to_btc_and_is_case_insensitive(self):

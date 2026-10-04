@@ -555,7 +555,9 @@ def _ta_to_regime(rec: str) -> str:
     if "SELL" in u: return "BEAR"
     return "CRAB"
 
-_REGIME_TTL_SECONDS = 14400   # 4h: overall bias + meta (published from the session snapshot)
+_REGIME_TTL_SECONDS = 50400   # 14h: overall bias + meta, published only at the session snapshots
+                               # (~00:00, 07:00, 13:00 UTC; longest normal gap ~11h). Still expires
+                               # if a session run fails; meta carries updated_at for the age.
 _REGIME_TF_TTL_SECONDS = 3600  # 1h: the 1h/4h TA regimes, refreshed every scan cycle; if the
                                # data stops they fade out on their own instead of going stale
 
