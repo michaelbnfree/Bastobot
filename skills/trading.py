@@ -95,49 +95,30 @@ def _calculate_bollinger_bands(prices, period=20, num_std=2):
 
 
 def _get_local_indicators(symbol, candles=None):
-    """Compute indicators locally from Binance candles (primary path, no external API)."""
+    """TradingView-style rating computed locally from Binance candles (primary path, no
+    external API). The rating (11 oscillators + 15 moving averages voting BUY/SELL/NEUTRAL)
+    lives in skills/ta_local.py. Until 2026-10-05 this returned RSI and Bollinger bands only,
+    with a fixed NEUTRAL summary and zeros for MACD/ADX/EMAs."""
+    from skills.ta_local import compute_ta
+
     pair = f"{symbol}USDT"
     tfs = candles or ("1h", "4h", "1d")
     results = {}
 
-    interval_map = {"1h": "1h", "4h": "4h", "1d": "1d"}
-    candle_counts = {"1h": 300, "4h": 300, "1d": 100}
-
     for tf in tfs:
-        if tf not in interval_map:
+        if tf not in ("1h", "4h", "1d"):
             continue
         try:
+            # 1000 candles (Binance max) so the 200-period averages are converged; the last
+            # row is the still-forming candle, as on TradingView.
             resp = requests.get(
                 "https://api.binance.com/api/v3/klines",
-                params={"symbol": pair, "interval": tf, "limit": candle_counts[tf]},
+                params={"symbol": pair, "interval": tf, "limit": 1000},
                 timeout=10
             )
-            klines = resp.json()
-            if not klines:
-                continue
-
-            # Include current forming candle for live momentum (matches TradingView default)
-            closes = [float(k[4]) for k in klines]
-            highs = [float(k[2]) for k in klines]
-            lows = [float(k[3]) for k in klines]
-
-            rsi = _calculate_rsi(closes, 14)
-            bb_upper, bb_basis, bb_lower = _calculate_bollinger_bands(closes, 20, 2)
-
-            if rsi is not None and bb_upper is not None:
-                results[tf] = {
-                    "summary": {"RECOMMENDATION": "NEUTRAL", "BUY": 0, "SELL": 0, "NEUTRAL": 0},
-                    "rsi": rsi,
-                    "macd": 0,
-                    "macd_signal": 0,
-                    "adx": 0,
-                    "ema_20": 0,
-                    "ema_50": 0,
-                    "ema_200": 0,
-                    "bb_upper": bb_upper,
-                    "bb_lower": bb_lower,
-                    "bb_basis": bb_basis,
-                }
+            ta = compute_ta(resp.json())
+            if ta:
+                results[tf] = ta
         except Exception as e:
             print(f"[TA-LOCAL] {tf} fetch failed: {e}")
 
