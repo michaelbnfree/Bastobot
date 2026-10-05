@@ -296,8 +296,8 @@ def oscillator_votes(v):
         all 14 price-vs-average rules
       Stoch RSI: only the SELL side is modelled (K > 80 and K < D reproduced 13/13); TradingView
         voted BUY on 2 of 127 samples whose pattern no simple rule explained, so BUY is not voted.
-      BBP: only the BUY side is modelled (bear power < 0 and rising matched every TradingView BUY);
-        TradingView's SELL votes (7 of 127) depend on something not recoverable from its output.
+      BBP: only the BUY side is modelled (bear power < 0 and rising, after a bar whose high was above the
+        EMA13; 248 of 272 samples agree); TradingView's SELL votes (15 of 272) were not recoverable.
       Ichimoku (see moving_average_votes): TradingView voted NEUTRAL on every sample.
     """
     return {
@@ -316,7 +316,9 @@ def oscillator_votes(v):
         "MACD": _vote(v["macd"] > v["macd_signal"], v["macd"] < v["macd_signal"]),
         "Stoch.RSI": _vote(False, _gt(v["stoch_rsi_k"], 80) and _lt(v["stoch_rsi_k"], v["stoch_rsi_d"])),
         "W%R": _vote(v["wr"] < -80 and v["wr"] > v["wr1"], v["wr"] > -20 and v["wr"] < v["wr1"]),
-        "BBP": _vote(v["bear"] < 0 and _gt(v["bear"], v["bear1"]), False),
+        # previous bar's high above the EMA13 is part of TradingView's BUY rule: without it 23 of 272
+        # samples were false alarms, with it 3 (checked on random symbol hold-out splits)
+        "BBP": _vote(v["bull1"] > 0 and v["bear"] < 0 and _gt(v["bear"], v["bear1"]), False),
         "UO": _vote(v["uo"] > 70, v["uo"] < 30),
     }
 
@@ -369,6 +371,7 @@ def compute_values(candles):
     values = {name: _last(s) for name, s in series.items()}
     values["bear"] = None if ema13[-1] is None else lows[-1] - ema13[-1]
     values["bear1"] = None if ema13[-2] is None else lows[-2] - ema13[-2]
+    values["bull1"] = None if ema13[-2] is None else highs[-2] - ema13[-2]
     for name in ("rsi", "stoch_k", "stoch_d", "cci", "plus_di", "minus_di", "ao", "mom", "wr", "bbp"):
         values[name + "1"] = _last(series[name], 1)
     values["ao2"] = _last(series["ao"], 2)

@@ -67,7 +67,7 @@ class TestParityWithPine(unittest.TestCase):
 def values(**overrides):
     base = {
         "close": 100.0, "rsi": 50, "rsi1": 50, "stoch_k": 50, "stoch_d": 50, "stoch_k1": 50, "stoch_d1": 50,
-        "bear": 0.0, "bear1": 0.0, "cci": 0, "cci1": 0,
+        "bear": 0.0, "bear1": 0.0, "bull1": 1.0, "cci": 0, "cci1": 0,
         "adx": 10, "plus_di": 20, "minus_di": 20, "plus_di1": 20, "minus_di1": 20,
         "ao": 0.0, "ao1": 0.0, "ao2": 0.0, "mom": 0, "mom1": 0, "macd": 0, "macd_signal": 0,
         "stoch_rsi_k": 50, "stoch_rsi_d": 50, "wr": -50, "wr1": -50, "bbp": 0, "bbp1": 0, "uo": 50,
@@ -135,7 +135,9 @@ class TestOscillatorVotes(unittest.TestCase):
         self.assertEqual(self.vote("W%R", wr=-10, wr1=-5), "SELL")
 
     def test_bull_bear_power_buys_on_a_negative_rising_bear_power_and_never_sells(self):
-        self.assertEqual(self.vote("BBP", bear=-5, bear1=-8), "BUY")
+        self.assertEqual(self.vote("BBP", bear=-5, bear1=-8, bull1=2), "BUY")
+        # previous bar's high was below the EMA13: TradingView stays NEUTRAL
+        self.assertEqual(self.vote("BBP", bear=-5, bear1=-8, bull1=-2), "NEUTRAL")
         self.assertEqual(self.vote("BBP", bear=-8, bear1=-5), "NEUTRAL")
         self.assertEqual(self.vote("BBP", bear=5, bear1=2), "NEUTRAL")
         self.assertEqual(self.vote("BBP", bear=5, bear1=8, bbp=5, bbp1=8), "NEUTRAL")   # SELL is not modelled
@@ -220,7 +222,7 @@ def tv_candles(sample):
 
 
 class TestAgainstTradingViewVotes(unittest.TestCase):
-    """13 coin/timeframe samples captured from TradingView (per-indicator votes) chosen to cover
+    """coin/timeframe samples captured from TradingView (per-indicator votes) chosen to cover
     every non-neutral vote the rules reproduce. Refresh with tools/check_ta_parity.py."""
 
     def test_modelled_votes_match_tradingview(self):
@@ -233,7 +235,7 @@ class TestAgainstTradingViewVotes(unittest.TestCase):
                     continue
                 checked += 1
                 mismatched += ours[indicator] != vote
-        self.assertGreater(checked, 13 * 25)
+        self.assertGreater(checked, len(TV_VOTES) * 25)
         # a one-tick data difference between Binance and TradingView can flip a borderline vote
         self.assertLessEqual(mismatched, 2, f"{mismatched}/{checked} votes differ from TradingView")
 
