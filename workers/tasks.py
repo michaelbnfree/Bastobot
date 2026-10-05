@@ -514,13 +514,13 @@ def _build_content(prompt, category, image_b64, mime_type):
     return f"{date_context}\n\n{prompt}" if prompt else prompt
 
 TEXT_MODELS = [
-    "google/gemini-2.0-flash-001",
-    "deepseek/deepseek-r1",
+    "google/gemini-2.5-flash",
     "meta-llama/llama-3.3-70b-instruct",
+    "deepseek/deepseek-r1",  # slow reasoning model, last resort only
 ]
 VISION_MODELS = [
-    "google/gemini-2.0-flash-001",
-    "anthropic/claude-3-haiku",
+    "google/gemini-2.5-flash",
+    "anthropic/claude-haiku-4.5",
 ]
 
 def _call_model(models, content):
@@ -538,7 +538,13 @@ def _call_model(models, content):
     data = response.json()
     if 'choices' not in data:
         raise RuntimeError(data.get('error', {}).get('message', str(data)))
-    return data['choices'][0]['message']['content']
+    content_out = data['choices'][0]['message']['content']
+    if not content_out:
+        raise RuntimeError(
+            f"Model returned empty content (finish_reason="
+            f"{data['choices'][0].get('finish_reason')!r}, model={data.get('model')!r})"
+        )
+    return content_out
 
 
 _SNAPSHOT_KEYWORDS = (
@@ -595,6 +601,32 @@ def _format_canary_status(payload: dict) -> str:
             f"Kill switch active: {kill.get('active', 'unknown')}",
         ]
     )
+
+
+_STATUS_SERVICES = (
+    "bastobot-tg", "bastobot-api", "bastobot-scanner", "bastobot-worker",
+    "bastobot-fast-worker", "bastobot-tasks-worker", "barry-phase5",
+    "barry-position-supervisor-daemon", "barry-shadow", "barry-dashboard",
+    "barry-tradingview-receiver", "barry-research-collector",
+)
+
+
+def _barry_status() -> str:
+    """Instant /status: service health plus canary status, no LLM call."""
+    lines = ["*Barry Services*"]
+    down = []
+    for svc in _STATUS_SERVICES:
+        state = subprocess.run(
+            ["systemctl", "is-active", svc], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        if state != "active":
+            down.append(f"{svc}: {state}")
+    lines.append(f"All {len(_STATUS_SERVICES)} running" if not down else "DOWN: " + ", ".join(down))
+    try:
+        canary = _barry_canary_status()
+    except Exception as e:
+        canary = f"Barry canary status unavailable: {e}"
+    return "\n".join(lines) + "\n\n" + canary
 
 
 def _barry_canary_status() -> str:
@@ -656,6 +688,9 @@ def _handle_scanner_command(prompt: str) -> str | None:
 
     if pl in ("canarystatus", "/canarystatus", "microstatus", "/microstatus"):
         return _barry_canary_status()
+
+    if pl in ("status", "/status"):
+        return _barry_status()
 
     # ── Watchlist ─────────────────────────────────────────────────────────────
     # "watch SOL" or "watch SOL - solana L1 narrative"

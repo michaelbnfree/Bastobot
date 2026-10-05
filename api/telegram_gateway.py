@@ -112,7 +112,11 @@ def poll_and_reply(job_id, chat_id):
                 if data.get("status") == "complete":
                     stop_typing_event.set()
                     typing_thread.join(timeout=1)
-                    _send_long(chat_id, data["response"])
+                    response_text = data.get("response")
+                    if not response_text:
+                        bot.send_message(chat_id, "❌ Job completed but returned an empty response.")
+                    else:
+                        _send_long(chat_id, response_text)
                     return
                 if data.get("status") in ("failed", "error"):
                     stop_typing_event.set()
